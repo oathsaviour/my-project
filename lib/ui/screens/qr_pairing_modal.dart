@@ -1,3 +1,4 @@
+import '../../core/models/discovered_device.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/security/qr_payload.dart';
