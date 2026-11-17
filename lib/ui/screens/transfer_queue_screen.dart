@@ -1,3 +1,4 @@
+import '../../core/models/discovered_device.dart';
 import 'package:flutter/material.dart';
 import '../../core/models/file_manifest.dart';
 import '../../core/models/transfer_session.dart';
