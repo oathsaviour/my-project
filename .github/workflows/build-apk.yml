@@ -26,7 +26,6 @@ jobs:
           sed -i 's/applicationId = ".*"/applicationId = "com.universal.filetransfer"/' android/app/build.gradle.kts
           sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
           sed -i 's/minSdk = .*/minSdk = 24/' android/app/build.gradle.kts
-          echo -e '\nsubprojects {\n    afterEvaluate {\n        project ->\n            if (project.hasProperty("android")) {\n                project.android {\n                    if (namespace == null) {\n                        namespace project.group\n                    }\n                    lintOptions {\n                        checkReleaseBuilds false\n                        abortOnError false\n                    }\n                }\n            }\n    }\n}' >> android/build.gradle.kts
           FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
       - run: flutter pub get
