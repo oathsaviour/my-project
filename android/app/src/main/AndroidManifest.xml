@@ -43,16 +43,16 @@
     <!-- Android 14 Selected Photos & Visual Media -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
-    <!-- Legacy Storage Permissions (API <= 32) -->
+    <!-- Legacy Storage Permissions (API <= 32 only for reading legacy external storage) -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+        android:maxSdkVersion="28" />
 
-    <!-- All-Files Access for Raw Binaries, APKs, Documents (API 30+) -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- NOTE: MANAGE_EXTERNAL_STORAGE is intentionally NOT requested to ensure 100% Google Play compliance.
+         Android 10 through 16+ uses MediaStore.Downloads and MediaStore.Images/Video Scoped Storage API. -->
 
     <!-- Camera for QR Code Pairing -->
     <uses-permission android:name="android.permission.CAMERA" />
