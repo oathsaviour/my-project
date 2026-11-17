@@ -163,8 +163,6 @@ class _MainAppShellState extends State<MainAppShell> {
       setState(() {
         _activeSession = _activeSession!.copyWith(
           files: updatedFiles,
-          currentSpeedMbPerSec: speedMb,
-          estimatedTimeRemaining: eta,
         );
       });
     };
