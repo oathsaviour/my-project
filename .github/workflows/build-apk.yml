@@ -24,6 +24,7 @@ jobs:
           flutter create . --platforms=android
           sed -i 's/namespace = ".*"/namespace = "com.universal.filetransfer"/' android/app/build.gradle.kts
           sed -i 's/applicationId = ".*"/applicationId = "com.universal.filetransfer"/' android/app/build.gradle.kts
+          sed -i 's/compileSdk = .*/compileSdk = 35/' android/app/build.gradle.kts
           sed -i 's/minSdk = .*/minSdk = 24/' android/app/build.gradle.kts
           FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
