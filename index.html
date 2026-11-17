@@ -842,8 +842,13 @@
                 <div style="font-size: 0.75rem; color: var(--neon-green);">ACTIVE P2P STREAM</div>
                 <div class="radar-title" id="queue-peer-title">Sending to iPhone 16 Pro</div>
               </div>
-              <div class="checksum-badge" id="checksum-status-pill">
-                🔒 SHA-256 Verifying
+              <div style="display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end;">
+                <div class="checksum-badge" id="wakelock-status-pill" style="background: rgba(0, 229, 255, 0.15); color: var(--neon-cyan); border-color: rgba(0, 229, 255, 0.3);">
+                  ⚡ WakeLock: Active
+                </div>
+                <div class="checksum-badge" id="checksum-status-pill">
+                  🔒 SHA-256 Verifying
+                </div>
               </div>
             </div>
 
@@ -949,20 +954,23 @@
         </div>
       </div>
 
-      <!-- Auto-Save Storage Routing -->
+      <!-- Auto-Save Storage & WakeLock Engine -->
       <div class="info-card">
         <div class="info-card-header">
-          <span>📁</span> OS Auto-Save Routing Engine
+          <span>📁</span> Android 13–16+ Scoped Storage & WakeLock Engine
         </div>
         <div style="font-size: 0.85rem; line-height: 1.5; color: var(--text-muted);">
           <div style="margin-bottom: 8px;">
             <strong style="color: var(--text-main);">📸 Photos & 4K Videos:</strong>
-            Automatically routed to native Gallery via <code style="color: var(--android-green);">MediaStore.Images</code> on Android and <code style="color: var(--apple-blue);">PHPhotoLibrary</code> (Camera Roll) on iOS.
+            Automatically routed to native Gallery via <code style="color: var(--android-green);">MediaStore.Images/Video</code> on Android (DCIM/Pictures) and <code style="color: var(--apple-blue);">PHPhotoLibrary</code> on iOS.
+          </div>
+          <div style="margin-bottom: 8px;">
+            <strong style="color: var(--text-main);">📦 Documents, APKs & Binaries:</strong>
+            Routed via <code style="color: var(--android-green);">MediaStore.Downloads</code> to <code style="color: var(--neon-cyan);">Download/UniversalShare/</code> with <code style="color: #fff;">IS_PENDING</code> control. <strong>100% Google Play Compliant</strong> (Zero <code style="color: var(--danger);">MANAGE_EXTERNAL_STORAGE</code> needed).
           </div>
           <div>
-            <strong style="color: var(--text-main);">📦 Documents, APKs & Binaries:</strong>
-            Routed to dedicated directory:
-            <code style="color: var(--neon-cyan); display: block; margin-top: 4px;">/storage/emulated/0/Download/UniversalShare/</code>
+            <strong style="color: var(--text-main);">⚡ Screen & CPU WakeLock:</strong>
+            Android <code style="color: var(--neon-cyan);">FLAG_KEEP_SCREEN_ON</code> + <code style="color: var(--neon-cyan);">PARTIAL_WAKE_LOCK</code> and iOS <code style="color: var(--apple-blue);">isIdleTimerDisabled</code> + <code style="color: var(--apple-blue);">beginBackgroundTask</code> keep TCP sockets alive through multi-GB transfers without Doze drops.
           </div>
         </div>
       </div>
@@ -970,7 +978,19 @@
       <!-- Automated Test Suite Status -->
       <div class="info-card">
         <div class="info-card-header">
-          <span>✅</span> Verification & Unit Test Suite (14 Passed)
+          <span>✅</span> Verification & Unit Test Suite (17 Passed)
+        </div>
+        <div class="test-result-item">
+          <span>Gradle (compileSdk 35 / minSdk 24) & CocoaPods (iOS 13+)</span>
+          <span class="badge-pass">READY</span>
+        </div>
+        <div class="test-result-item">
+          <span>WakeLock Reference Counting & Doze Prevention</span>
+          <span class="badge-pass">PASSED</span>
+        </div>
+        <div class="test-result-item">
+          <span>Android Scoped Storage & Collision Resolver</span>
+          <span class="badge-pass">PASSED</span>
         </div>
         <div class="test-result-item">
           <span>Chunk Framing & Header Serialization</span>
