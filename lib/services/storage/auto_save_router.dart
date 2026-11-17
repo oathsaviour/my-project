@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/services.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/models/file_manifest.dart';
 
@@ -8,13 +9,17 @@ typedef MediaNotifyCallback = Future<void> Function(
   String mimeType,
 );
 
-/// Platform-agnostic Auto-Save Router.
-/// Automatically moves files to the target destination and triggers media scan callbacks.
+/// Platform-agnostic Auto-Save Router with Scoped Storage MediaStore compliance.
+/// Automatically routes files to native destinations:
+/// - Android 10-16+: MediaStore.Downloads ("Download/UniversalShare") & MediaStore.Images/Video (Zero MANAGE_EXTERNAL_STORAGE needed).
+/// - iOS: Photos framework (Camera Roll) & Documents directory ("UniversalShare").
 class AutoSaveRouter {
+  static const MethodChannel _channel = MethodChannel('com.universal.filetransfer/native');
+
   /// Test or environment override for target base directory.
   static String? overrideBaseDirectory;
 
-  /// Optional platform-specific media indexing handler (e.g. Flutter MethodChannel).
+  /// Optional platform-specific media indexing handler.
   static MediaNotifyCallback? platformMediaNotifier;
 
   /// Resolves the dedicated target directory for incoming files.
@@ -26,6 +31,15 @@ class AutoSaveRouter {
       }
       return dir.path;
     }
+
+    try {
+      if (Platform.isAndroid || Platform.isIOS) {
+        final customPath = await _channel.invokeMethod<String>('getUniversalShareDirectory');
+        if (customPath != null && customPath.isNotEmpty) {
+          return customPath;
+        }
+      }
+    } catch (_) {}
 
     try {
       final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path;
@@ -41,7 +55,7 @@ class AutoSaveRouter {
   }
 
   /// Automatically moves a successfully received file to its final destination
-  /// and registers it with the OS (Camera Roll / MediaScanner).
+  /// via native MediaStore API (Android) or Photos framework / Documents (iOS).
   static Future<String> routeReceivedFile({
     required String tempFilePath,
     required String fileName,
@@ -53,11 +67,51 @@ class AutoSaveRouter {
       throw FileSystemException('Source temporary file does not exist', tempFilePath);
     }
 
+    // 1. Android MediaStore Scoped Storage Routing (API 29-35+)
+    try {
+      if (Platform.isAndroid && overrideBaseDirectory == null) {
+        if (category == FileCategory.photos || category == FileCategory.videos) {
+          final uri = await _channel.invokeMethod<String>('saveMediaToGallery', {
+            'tempPath': tempFilePath,
+            'fileName': fileName,
+            'mimeType': mimeType,
+            'isVideo': category == FileCategory.videos,
+          });
+          if (uri != null && uri.isNotEmpty) {
+            return uri;
+          }
+        } else {
+          // Documents, APKs, Binaries to Downloads/UniversalShare via MediaStore.Downloads
+          final uri = await _channel.invokeMethod<String>('saveToDownloads', {
+            'tempPath': tempFilePath,
+            'fileName': fileName,
+            'mimeType': mimeType,
+          });
+          if (uri != null && uri.isNotEmpty) {
+            return uri;
+          }
+        }
+      }
+    } catch (_) {
+      // Fallback to direct filesystem routing in tests / dev environments
+    }
+
+    // 2. iOS Camera Roll Routing
+    try {
+      if (Platform.isIOS && overrideBaseDirectory == null) {
+        if (category == FileCategory.photos) {
+          await _channel.invokeMethod('saveImageToGallery', {'path': tempFilePath});
+        } else if (category == FileCategory.videos) {
+          await _channel.invokeMethod('saveVideoToGallery', {'path': tempFilePath});
+        }
+      }
+    } catch (_) {}
+
+    // 3. Filesystem fallback (Desktop, Unit Tests, iOS Documents)
     final targetDir = await getTargetDirectory(category);
     final targetFilePath = '$targetDir/$fileName';
     final targetFile = File(targetFilePath);
 
-    // Overwrite or create unique name if target exists
     if (await targetFile.exists()) {
       final dot = fileName.lastIndexOf('.');
       final base = dot != -1 ? fileName.substring(0, dot) : fileName;

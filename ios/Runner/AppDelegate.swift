@@ -5,6 +5,7 @@ import Photos
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
   private let CHANNEL = "com.universal.filetransfer/native"
+  private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
 
   override func application(
     _ application: UIApplication,
@@ -16,6 +17,31 @@ import Photos
     methodChannel.setMethodCallHandler({
       [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) -> Void in
       switch call.method {
+
+      // Wake Lock & Background Keep-Alive for iOS
+      case "acquireWakeLock":
+        DispatchQueue.main.async {
+          // 1. Prevent screen auto-lock / dimming
+          UIApplication.shared.isIdleTimerDisabled = true
+
+          // 2. Begin background task so TCP socket does not terminate if user briefly leaves app
+          if self?.backgroundTaskId == .invalid {
+            self?.backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "UniversalTransferActive") {
+              self?.endBackgroundTask()
+            }
+          }
+          result(true)
+        }
+
+      case "releaseWakeLock":
+        DispatchQueue.main.async {
+          // Restore normal idle timer
+          UIApplication.shared.isIdleTimerDisabled = false
+          self?.endBackgroundTask()
+          result(true)
+        }
+
+      // Photos Framework Auto-Routing
       case "saveImageToGallery":
         guard let args = call.arguments as? [String: Any],
               let filePath = args["path"] as? String else {
@@ -23,6 +49,7 @@ import Photos
           return
         }
         self?.saveToCameraRoll(path: filePath, isVideo: false, result: result)
+
       case "saveVideoToGallery":
         guard let args = call.arguments as? [String: Any],
               let filePath = args["path"] as? String else {
@@ -30,6 +57,8 @@ import Photos
           return
         }
         self?.saveToCameraRoll(path: filePath, isVideo: true, result: result)
+
+      // Documents Directory for raw files / binaries (visible in iOS Files app)
       case "getUniversalShareDirectory":
         if let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
           let shareDir = docsDir.appendingPathComponent("UniversalShare")
@@ -40,6 +69,7 @@ import Photos
         } else {
           result(FlutterError(code: "DIR_ERROR", message: "Could not access documents directory", details: nil))
         }
+
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -47,6 +77,13 @@ import Photos
 
     GeneratedPluginRegistrant.register(with: self)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  private func endBackgroundTask() {
+    if backgroundTaskId != .invalid {
+      UIApplication.shared.endBackgroundTask(backgroundTaskId)
+      backgroundTaskId = .invalid
+    }
   }
 
   private func saveToCameraRoll(path: String, isVideo: Bool, result: @escaping FlutterResult) {
