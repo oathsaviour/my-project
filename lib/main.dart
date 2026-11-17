@@ -157,7 +157,7 @@ class _MainAppShellState extends State<MainAppShell> {
   void _openQrPairing() {
     showModalBottomSheet(
       context: context,
-      isScrollable: true,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => QrPairingModal(
         localPayload: _discoveryManager.getLocalQrPayload(),
