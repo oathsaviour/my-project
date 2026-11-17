@@ -12,15 +12,12 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'platforms;android-36 build-tools;34.0.0 platform-tools'
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
       - run: flutter config --jdk-dir=$JAVA_HOME
       - run: |
+          rm -f pubspec.lock
           rm -f android/settings.gradle android/settings.gradle.kts
           rm -f android/build.gradle android/build.gradle.kts
           rm -f android/app/build.gradle android/app/build.gradle.kts
@@ -31,6 +28,18 @@ jobs:
           sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
           sed -i 's/targetSdk = .*/targetSdk = 36/' android/app/build.gradle.kts
           sed -i 's/minSdk = .*/minSdk = 24/' android/app/build.gradle.kts
+          cat << 'EOF' >> android/build.gradle.kts
+
+          subprojects {
+              afterEvaluate {
+                  if (extensions.findByName("android") != null) {
+                      extensions.configure<com.android.build.gradle.BaseExtension>("android") {
+                          compileSdkVersion(36)
+                      }
+                  }
+              }
+          }
+          EOF
           FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
       - run: flutter pub get
