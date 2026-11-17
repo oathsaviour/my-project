@@ -28,6 +28,18 @@
       "created_at": "2026-11-17T13:41:11.738Z",
       "sender": "macOS",
       "is_cancelled": false
+    },
+    {
+      "id": "6a44d2a7-33cd-4d2d-b45f-84e45ad21df7",
+      "role": "user",
+      "content": "Before I build and test on physical Android and iOS devices, audit and verify the following 3 edge cases in our codebase:\n\n1. **Gradle & CocoaPods Build Readiness:** Ensure `android/app/build.gradle` (compileSdk 35+, minSdk 24+) and `ios/Podfile` (iOS 13.0+ deployment target) have matching dependency versions for all packages in `pubspec.yaml` so `flutter build apk` and `flutter build ios` compile cleanly without version conflicts.\n2. **Android 13–16+ Storage & Media Permissions:** Verify `StorageRouter` uses `MediaStore` API via `MainActivity.kt` when saving to `Downloads/UniversalShare` so it works on Android 13–16+ without requiring `MANAGE_EXTERNAL_STORAGE` (which Google Play blocks).\n3. **WakeLock & Background Keep-Alive:** Add a screen/CPU wake-lock during active transfers so neither Android Doze mode nor iOS screen auto-lock drops the TCP socket mid-transfer on multi-GB files.",
+      "status": "pending",
+      "model": "gemini-3.8-flash-high",
+      "client_type": "gemini-bridge",
+      "parent_message_id": null,
+      "created_at": "2026-11-17T13:47:36.365Z",
+      "sender": "ios",
+      "is_cancelled": false
     }
   ]
 }
