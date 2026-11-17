@@ -17,7 +17,10 @@ jobs:
           channel: 'stable'
       - run: flutter config --jdk-dir=$JAVA_HOME
       - run: |
-          rm -f android/settings.gradle android/build.gradle android/gradle/wrapper/gradle-wrapper.properties
+          rm -f android/settings.gradle android/settings.gradle.kts
+          rm -f android/build.gradle android/build.gradle.kts
+          rm -f android/app/build.gradle android/app/build.gradle.kts
+          rm -f android/gradle/wrapper/gradle-wrapper.properties
           flutter create . --platforms=android
           FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
