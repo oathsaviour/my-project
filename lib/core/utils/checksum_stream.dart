@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart';
 
 /// Utilities for streaming SHA-256 checksum calculation without buffering files into RAM.
