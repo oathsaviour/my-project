@@ -1,10 +1,12 @@
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../../core/models/discovered_device.dart';
 import '../../core/models/file_manifest.dart';
 import '../../core/utils/formatters.dart';
 import '../theme/app_theme.dart';
 
-/// Categorized File Picker Hub for selecting uncompressed photos, videos, docs, and APKs.
+/// Real File Picker Hub for selecting uncompressed photos, videos, docs, APKs, and archives.
 class FilePickerHubScreen extends StatefulWidget {
   final DiscoveredDevice targetDevice;
   final ValueChanged<List<FileManifestItem>> onConfirmSend;
@@ -21,72 +23,15 @@ class FilePickerHubScreen extends StatefulWidget {
 
 class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  final List<FileManifestItem> _pickedFiles = [];
   final Set<String> _selectedFileIds = {};
-
-  // Sample categorized file inventory (on physical device populated via photo_manager / file_picker)
-  final List<FileManifestItem> _availableFiles = [
-    // Photos
-    FileManifestItem.create(
-      fileId: 'photo_1',
-      fileName: 'IMG_20261117_ProRAW.dng',
-      fileSize: 48 * 1024 * 1024,
-    ),
-    FileManifestItem.create(
-      fileId: 'photo_2',
-      fileName: 'DSC_0894_Landscape.heic',
-      fileSize: 14 * 1024 * 1024,
-    ),
-    // Videos
-    FileManifestItem.create(
-      fileId: 'video_1',
-      fileName: 'Cinematic_4K60fps_ProRes.mov',
-      fileSize: 3200 * 1024 * 1024, // 3.2 GB
-    ),
-    FileManifestItem.create(
-      fileId: 'video_2',
-      fileName: 'Drone_Footage_Rec709.mp4',
-      fileSize: 1800 * 1024 * 1024, // 1.8 GB
-    ),
-    // Audio
-    FileManifestItem.create(
-      fileId: 'audio_1',
-      fileName: 'Studio_Master_Track_24bit.flac',
-      fileSize: 95 * 1024 * 1024,
-    ),
-    // Documents
-    FileManifestItem.create(
-      fileId: 'doc_1',
-      fileName: 'System_Architecture_Blueprint.pdf',
-      fileSize: 18 * 1024 * 1024,
-    ),
-    FileManifestItem.create(
-      fileId: 'doc_2',
-      fileName: 'Financial_Forecast_2027.xlsx',
-      fileSize: 8 * 1024 * 1024,
-    ),
-    // Apps / Packages
-    FileManifestItem.create(
-      fileId: 'app_1',
-      fileName: 'UniversalTransfer_v1.0_arm64.apk',
-      fileSize: 64 * 1024 * 1024,
-    ),
-    FileManifestItem.create(
-      fileId: 'app_2',
-      fileName: 'Release_Payload.ipa',
-      fileSize: 112 * 1024 * 1024,
-    ),
-    // Raw Binaries / Archive
-    FileManifestItem.create(
-      fileId: 'raw_1',
-      fileName: 'DiskImage_Backup.iso',
-      fileSize: 4800 * 1024 * 1024, // 4.8 GB (>4GB Large File Test)
-    ),
-  ];
+  bool _isPicking = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: FileCategory.values.length, vsync: this);
+    _tabController = TabController(length: FileCategory.values.length + 1, vsync: this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pickFilesFromDevice());
   }
 
   @override
@@ -95,8 +40,53 @@ class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTi
     super.dispose();
   }
 
+  Future<void> _pickFilesFromDevice() async {
+    if (_isPicking) return;
+    setState(() => _isPicking = true);
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: FileType.any,
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        for (final pf in result.files) {
+          final path = pf.path;
+          if (path == null) continue;
+
+          final file = File(path);
+          if (!await file.exists()) continue;
+
+          final size = await file.length();
+          final id = 'file_${DateTime.now().microsecondsSinceEpoch}_${pf.name.hashCode}';
+
+          final item = FileManifestItem.create(
+            fileId: id,
+            fileName: pf.name,
+            fileSize: size,
+            localFilePath: path,
+          );
+
+          if (!_pickedFiles.any((existing) => existing.localFilePath == path)) {
+            _pickedFiles.add(item);
+            _selectedFileIds.add(id);
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error picking files: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isPicking = false);
+    }
+  }
+
   int get _totalSelectedBytes {
-    return _availableFiles
+    return _pickedFiles
         .where((f) => _selectedFileIds.contains(f.fileId))
         .fold(0, (sum, f) => sum + f.fileSize);
   }
@@ -113,6 +103,8 @@ class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTi
 
   @override
   Widget build(BuildContext context) {
+    final allTabs = ['All (${_pickedFiles.length})', ...FileCategory.values.map((c) => c.displayName)];
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -125,94 +117,31 @@ class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTi
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Add More Files',
+            icon: const Icon(Icons.add_circle_outline, color: AppTheme.accentNeon),
+            onPressed: _pickFilesFromDevice,
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           isScrollable: true,
           indicatorColor: AppTheme.accentNeon,
           labelColor: AppTheme.accentNeon,
           unselectedLabelColor: AppTheme.textSecondary,
-          tabs: FileCategory.values
-              .map((cat) => Tab(text: cat.displayName))
-              .toList(),
+          tabs: allTabs.map((label) => Tab(text: label)).toList(),
         ),
       ),
       body: TabBarView(
         controller: _tabController,
-        children: FileCategory.values.map((category) {
-          final categoryFiles =
-              _availableFiles.where((f) => f.category == category).toList();
-
-          if (categoryFiles.isEmpty) {
-            return Center(
-              child: Text(
-                'No files in ${category.displayName}',
-                style: const TextStyle(color: AppTheme.textSecondary),
-              ),
-            );
-          }
-
-          return ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: categoryFiles.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 10),
-            itemBuilder: (context, index) {
-              final file = categoryFiles[index];
-              final isSelected = _selectedFileIds.contains(file.fileId);
-
-              return InkWell(
-                onTap: () => _toggleFile(file.fileId),
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: isSelected ? AppTheme.accentNeon.withOpacity(0.08) : AppTheme.darkCard,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isSelected ? AppTheme.accentNeon : const Color(0xFF30363D),
-                      width: isSelected ? 1.5 : 1.0,
-                    ),
-                  ),
-                  padding: const EdgeInsets.all(14),
-                  child: Row(
-                    children: [
-                      Icon(
-                        _getCategoryIcon(file.category),
-                        color: isSelected ? AppTheme.accentNeon : AppTheme.textSecondary,
-                        size: 32,
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              file.fileName,
-                              style: const TextStyle(
-                                color: AppTheme.textPrimary,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 14,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${Formatters.formatBytes(file.fileSize)} • ${file.mimeType}',
-                              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Checkbox(
-                        value: isSelected,
-                        activeColor: AppTheme.accentNeon,
-                        checkColor: AppTheme.darkBackground,
-                        onChanged: (_) => _toggleFile(file.fileId),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          );
-        }).toList(),
+        children: [
+          _buildFileList(_pickedFiles),
+          ...FileCategory.values.map((category) {
+            final filtered = _pickedFiles.where((f) => f.category == category).toList();
+            return _buildFileList(filtered, emptyLabel: 'No ${category.displayName} selected');
+          }),
+        ],
       ),
       bottomNavigationBar: Container(
         padding: const EdgeInsets.all(16),
@@ -242,11 +171,23 @@ class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTi
                   ],
                 ),
               ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.accentNeon,
+                  side: const BorderSide(color: AppTheme.accentNeon),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                icon: const Icon(Icons.folder_open, size: 18),
+                label: const Text('Browse'),
+                onPressed: _pickFilesFromDevice,
+              ),
+              const SizedBox(width: 10),
               ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _selectedFileIds.isNotEmpty ? AppTheme.accentNeon : Colors.grey,
                   foregroundColor: AppTheme.darkBackground,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 icon: const Icon(Icons.rocket_launch, size: 20),
@@ -257,7 +198,7 @@ class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTi
                 onPressed: _selectedFileIds.isEmpty
                     ? null
                     : () {
-                        final filesToSend = _availableFiles
+                        final filesToSend = _pickedFiles
                             .where((f) => _selectedFileIds.contains(f.fileId))
                             .toList();
                         widget.onConfirmSend(filesToSend);
@@ -267,6 +208,97 @@ class _FilePickerHubScreenState extends State<FilePickerHubScreen> with SingleTi
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildFileList(List<FileManifestItem> files, {String emptyLabel = 'No files selected yet'}) {
+    if (_isPicking && files.isEmpty) {
+      return const Center(child: CircularProgressIndicator(color: AppTheme.accentNeon));
+    }
+
+    if (files.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.upload_file, size: 48, color: AppTheme.textSecondary),
+            const SizedBox(height: 12),
+            Text(emptyLabel, style: const TextStyle(color: AppTheme.textSecondary)),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.accentNeon,
+                foregroundColor: AppTheme.darkBackground,
+              ),
+              icon: const Icon(Icons.add),
+              label: const Text('Choose Files from Device'),
+              onPressed: _pickFilesFromDevice,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemCount: files.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        final file = files[index];
+        final isSelected = _selectedFileIds.contains(file.fileId);
+
+        return InkWell(
+          onTap: () => _toggleFile(file.fileId),
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            decoration: BoxDecoration(
+              color: isSelected ? AppTheme.accentNeon.withOpacity(0.08) : AppTheme.darkCard,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isSelected ? AppTheme.accentNeon : const Color(0xFF30363D),
+                width: isSelected ? 1.5 : 1.0,
+              ),
+            ),
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Icon(
+                  _getCategoryIcon(file.category),
+                  color: isSelected ? AppTheme.accentNeon : AppTheme.textSecondary,
+                  size: 32,
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        file.fileName,
+                        style: const TextStyle(
+                          color: AppTheme.textPrimary,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${Formatters.formatBytes(file.fileSize)} • ${file.mimeType}',
+                        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                Checkbox(
+                  value: isSelected,
+                  activeColor: AppTheme.accentNeon,
+                  checkColor: AppTheme.darkBackground,
+                  onChanged: (_) => _toggleFile(file.fileId),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
