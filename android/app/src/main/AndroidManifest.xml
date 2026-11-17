@@ -1,5 +1,4 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  
 
     <!-- Network & Local Wi-Fi Discovery Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -40,19 +39,15 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <!-- Android 14 Selected Photos & Visual Media -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
-    <!-- Legacy Storage Permissions (API <= 32 only for reading legacy external storage) -->
+    <!-- Legacy Storage Permissions (API <= 32) -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
-
-    <!-- NOTE: MANAGE_EXTERNAL_STORAGE is intentionally NOT requested to ensure 100% Google Play compliance.
-         Android 10 through 16+ uses MediaStore.Downloads and MediaStore.Images/Video Scoped Storage API. -->
 
     <!-- Camera for QR Code Pairing -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -84,7 +79,7 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
-            
+
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
@@ -94,7 +89,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Support receiving files from system "Share With" menu -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -106,7 +100,6 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
 
-            <!-- Custom URI Scheme for QR Pairing: ushare://pair?ip=... -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -115,7 +108,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Don't delete metadata below; used by Flutter tooling -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
