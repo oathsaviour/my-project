@@ -16,7 +16,11 @@ jobs:
         with:
           channel: 'stable'
       - run: flutter config --jdk-dir=$JAVA_HOME
-      - run: echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
+      - run: |
+          rm -f android/settings.gradle android/build.gradle android/gradle/wrapper/gradle-wrapper.properties
+          flutter create . --platforms=android
+          FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
+          echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
