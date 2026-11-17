@@ -1,0 +1,10 @@
+name: transfer_core_tests
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  crypto: ^3.0.3
+  mime: ^1.0.5
+
+dev_dependencies:
+  test: ^1.25.0
