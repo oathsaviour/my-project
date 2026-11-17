@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Universal Transfer</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>universal_file_transfer</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+
+	<!-- Local Network & Bonjour Discovery Permissions -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Universal Transfer uses your local Wi-Fi and Hotspot network to discover and transfer raw files between Android and Apple devices without cloud servers.</string>
+	
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_filetransfer._tcp</string>
+		<string>_universal-share._tcp</string>
+	</array>
+
+	<!-- Bluetooth Permissions for offline beacon fallback -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Universal Transfer uses Bluetooth Low Energy to announce availability and detect nearby devices when Wi-Fi router isolation prevents direct broadcast.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Used to advertise device pairing tokens to nearby peers.</string>
+
+	<!-- Photos & Media Library Permissions -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Universal Transfer needs access to your Photo Library to select photos and videos for transfer.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Universal Transfer saves received photos and videos directly into your Camera Roll.</string>
+
+	<!-- Camera for QR Code Pairing -->
+	<key>NSCameraUsageDescription</key>
+	<string>Camera is used to scan pairing QR codes for instant device connection.</string>
+
+	<!-- Files App & iTunes Sharing Support -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
+	<!-- Custom URL Scheme: ushare://pair?ip=... -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.universal.filetransfer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ushare</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- App Transport Security: Allow local private subnet transfers -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>
