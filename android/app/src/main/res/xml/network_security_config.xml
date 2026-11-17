@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext communication on private local subnets (RFC 1918 & Hotspot) -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- Typical Wi-Fi Subnets -->
+        <domain includeSubdomains="true">192.168.0.0/16</domain>
+        <domain includeSubdomains="true">192.168.1.0/24</domain>
+        <!-- Android Hotspot default subnet -->
+        <domain includeSubdomains="true">192.168.43.0/24</domain>
+        <!-- iOS Hotspot default subnet -->
+        <domain includeSubdomains="true">172.20.10.0/24</domain>
+        <!-- Class A Private Subnets -->
+        <domain includeSubdomains="true">10.0.0.0/8</domain>
+        <!-- Localhost / Loopback -->
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
+    </domain-config>
+</network-security-config>
