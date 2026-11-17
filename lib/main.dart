@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'core/models/discovered_device.dart';
 import 'core/models/file_manifest.dart';
 import 'core/models/transfer_session.dart';
 import 'services/discovery/discovery_service.dart';
+import 'services/storage/auto_save_router.dart';
+import 'services/transfer/wake_lock_manager.dart';
 import 'ui/screens/file_picker_hub.dart';
 import 'ui/screens/hotspot_guide_screen.dart';
 import 'ui/screens/qr_pairing_modal.dart';
@@ -12,6 +15,12 @@ import 'ui/theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize native platform channel bridges for MediaStore scoped storage & WakeLock
+  const channel = MethodChannel('com.universal.filetransfer/native');
+  WakeLockManager.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
+  AutoSaveRouter.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
+
   runApp(const UniversalTransferApp());
 }
 

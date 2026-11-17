@@ -1,10 +1,13 @@
-import 'dart:io';
-import 'package:flutter/services.dart';
+import 'dart:async';
+
+typedef NativeChannelInvoker = Future<T?> Function<T>(String method, [dynamic arguments]);
 
 /// Manages CPU and screen wake locks during active file transfers
 /// to prevent Android Doze mode and iOS screen auto-lock from dropping sockets.
 class WakeLockManager {
-  static const MethodChannel _channel = MethodChannel('com.universal.filetransfer/native');
+  /// Injected native channel invoker (configured by Flutter in main.dart).
+  static NativeChannelInvoker? nativeChannelInvoker;
+
   static int _activeLockCount = 0;
   static bool _isHeld = false;
 
@@ -16,10 +19,10 @@ class WakeLockManager {
     _activeLockCount++;
     if (_activeLockCount == 1 && !_isHeld) {
       _isHeld = true;
-      try {
-        await _channel.invokeMethod('acquireWakeLock', {'reason': reason});
-      } catch (_) {
-        // Graceful fallback in pure CLI test runners or web simulator
+      if (nativeChannelInvoker != null) {
+        try {
+          await nativeChannelInvoker!('acquireWakeLock', {'reason': reason});
+        } catch (_) {}
       }
     }
   }
@@ -32,10 +35,10 @@ class WakeLockManager {
 
     if (_activeLockCount == 0 && _isHeld) {
       _isHeld = false;
-      try {
-        await _channel.invokeMethod('releaseWakeLock');
-      } catch (_) {
-        // Graceful fallback
+      if (nativeChannelInvoker != null) {
+        try {
+          await nativeChannelInvoker!('releaseWakeLock');
+        } catch (_) {}
       }
     }
   }
@@ -45,9 +48,11 @@ class WakeLockManager {
     _activeLockCount = 0;
     if (_isHeld) {
       _isHeld = false;
-      try {
-        await _channel.invokeMethod('releaseWakeLock');
-      } catch (_) {}
+      if (nativeChannelInvoker != null) {
+        try {
+          await nativeChannelInvoker!('releaseWakeLock');
+        } catch (_) {}
+      }
     }
   }
 }

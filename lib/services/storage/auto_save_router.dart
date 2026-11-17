@@ -1,7 +1,7 @@
 import 'dart:io';
-import 'package:flutter/services.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/models/file_manifest.dart';
+import '../transfer/wake_lock_manager.dart';
 
 typedef MediaNotifyCallback = Future<void> Function(
   String filePath,
@@ -14,7 +14,8 @@ typedef MediaNotifyCallback = Future<void> Function(
 /// - Android 10-16+: MediaStore.Downloads ("Download/UniversalShare") & MediaStore.Images/Video (Zero MANAGE_EXTERNAL_STORAGE needed).
 /// - iOS: Photos framework (Camera Roll) & Documents directory ("UniversalShare").
 class AutoSaveRouter {
-  static const MethodChannel _channel = MethodChannel('com.universal.filetransfer/native');
+  /// Injected native channel invoker (configured by Flutter in main.dart).
+  static NativeChannelInvoker? nativeChannelInvoker;
 
   /// Test or environment override for target base directory.
   static String? overrideBaseDirectory;
@@ -33,8 +34,8 @@ class AutoSaveRouter {
     }
 
     try {
-      if (Platform.isAndroid || Platform.isIOS) {
-        final customPath = await _channel.invokeMethod<String>('getUniversalShareDirectory');
+      if ((Platform.isAndroid || Platform.isIOS) && nativeChannelInvoker != null) {
+        final customPath = await nativeChannelInvoker!<String>('getUniversalShareDirectory');
         if (customPath != null && customPath.isNotEmpty) {
           return customPath;
         }
@@ -68,10 +69,10 @@ class AutoSaveRouter {
     }
 
     // 1. Android MediaStore Scoped Storage Routing (API 29-35+)
-    try {
-      if (Platform.isAndroid && overrideBaseDirectory == null) {
+    if (Platform.isAndroid && overrideBaseDirectory == null && nativeChannelInvoker != null) {
+      try {
         if (category == FileCategory.photos || category == FileCategory.videos) {
-          final uri = await _channel.invokeMethod<String>('saveMediaToGallery', {
+          final uri = await nativeChannelInvoker!<String>('saveMediaToGallery', {
             'tempPath': tempFilePath,
             'fileName': fileName,
             'mimeType': mimeType,
@@ -82,7 +83,7 @@ class AutoSaveRouter {
           }
         } else {
           // Documents, APKs, Binaries to Downloads/UniversalShare via MediaStore.Downloads
-          final uri = await _channel.invokeMethod<String>('saveToDownloads', {
+          final uri = await nativeChannelInvoker!<String>('saveToDownloads', {
             'tempPath': tempFilePath,
             'fileName': fileName,
             'mimeType': mimeType,
@@ -91,21 +92,19 @@ class AutoSaveRouter {
             return uri;
           }
         }
-      }
-    } catch (_) {
-      // Fallback to direct filesystem routing in tests / dev environments
+      } catch (_) {}
     }
 
     // 2. iOS Camera Roll Routing
-    try {
-      if (Platform.isIOS && overrideBaseDirectory == null) {
+    if (Platform.isIOS && overrideBaseDirectory == null && nativeChannelInvoker != null) {
+      try {
         if (category == FileCategory.photos) {
-          await _channel.invokeMethod('saveImageToGallery', {'path': tempFilePath});
+          await nativeChannelInvoker!('saveImageToGallery', {'path': tempFilePath});
         } else if (category == FileCategory.videos) {
-          await _channel.invokeMethod('saveVideoToGallery', {'path': tempFilePath});
+          await nativeChannelInvoker!('saveVideoToGallery', {'path': tempFilePath});
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
     // 3. Filesystem fallback (Desktop, Unit Tests, iOS Documents)
     final targetDir = await getTargetDirectory(category);
