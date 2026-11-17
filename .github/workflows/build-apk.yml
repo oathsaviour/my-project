@@ -16,18 +16,37 @@ jobs:
         with:
           channel: 'stable'
       - run: flutter config --jdk-dir=$JAVA_HOME
-      - run: |
+      - name: Prepare Android NDK & Project Config
+        run: |
+          # Detect pre-installed NDK on ubuntu-latest runner (avoids 1.5GB network download & zip corruption)
+          INSTALLED_NDK=$(ls -1 "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$INSTALLED_NDK" ]; then
+            INSTALLED_NDK="28.2.13676358"
+            for attempt in 1 2 3; do
+              rm -rf "$ANDROID_HOME/ndk/$INSTALLED_NDK" "$ANDROID_HOME/.temp"
+              yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+              if "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$INSTALLED_NDK"; then
+                break
+              fi
+              sleep 5
+            done
+          fi
+          echo "Using Android NDK: $INSTALLED_NDK"
+
           rm -f pubspec.lock
           rm -f android/settings.gradle android/settings.gradle.kts
           rm -f android/build.gradle android/build.gradle.kts
           rm -f android/app/build.gradle android/app/build.gradle.kts
           rm -f android/gradle/wrapper/gradle-wrapper.properties
           flutter create . --platforms=android
+
           sed -i 's/namespace = ".*"/namespace = "com.universal.filetransfer"/' android/app/build.gradle.kts
           sed -i 's/applicationId = ".*"/applicationId = "com.universal.filetransfer"/' android/app/build.gradle.kts
           sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
           sed -i 's/targetSdk = .*/targetSdk = 36/' android/app/build.gradle.kts
           sed -i 's/minSdk = .*/minSdk = 24/' android/app/build.gradle.kts
+          sed -i "s/ndkVersion = .*/ndkVersion = \"$INSTALLED_NDK\"/" android/app/build.gradle.kts
+
           cat << 'EOF' >> android/build.gradle.kts
 
           subprojects {
@@ -35,11 +54,14 @@ jobs:
                   if (extensions.findByName("android") != null) {
                       extensions.configure<com.android.build.gradle.BaseExtension>("android") {
                           compileSdkVersion(36)
+                          ndkVersion = "$INSTALLED_NDK"
                       }
                   }
               }
           }
           EOF
+          sed -i "s/\$INSTALLED_NDK/$INSTALLED_NDK/g" android/build.gradle.kts
+
           FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
       - run: flutter pub get
