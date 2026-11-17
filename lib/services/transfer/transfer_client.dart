@@ -8,6 +8,7 @@ import '../../core/models/discovered_device.dart';
 import '../../core/models/file_manifest.dart';
 import '../../core/utils/checksum_stream.dart';
 import '../../core/utils/speed_calculator.dart';
+import 'wake_lock_manager.dart';
 
 typedef ClientProgressCallback = void Function(
   String fileId,
@@ -37,14 +38,17 @@ class TransferClient {
 
   void pause() {
     _isPaused = true;
+    WakeLockManager.releaseWakeLock();
   }
 
   void resume() {
     _isPaused = false;
+    WakeLockManager.acquireWakeLock(reason: 'Resumed Transfer');
   }
 
   void cancel() {
     _isCanceled = true;
+    WakeLockManager.forceReleaseAll();
   }
 
   /// Executes end-to-end file transfer session to target peer device.
@@ -58,26 +62,33 @@ class TransferClient {
     _isCanceled = false;
     _speedCalculator.reset();
 
-    final baseUrl = 'http://${targetDevice.ipAddress}:${targetDevice.port}';
+    // Acquire screen and CPU wake lock to prevent Doze mode or screen auto-lock
+    await WakeLockManager.acquireWakeLock(reason: 'Sending files to ${targetDevice.name}');
 
-    // Step 1: Handshake
-    final handshakeOk = await _performHandshake(baseUrl, targetDevice.sessionToken, authPin);
-    if (!handshakeOk) {
-      throw const SocketException('Handshake rejected: invalid PIN or authentication token');
+    try {
+      final baseUrl = 'http://${targetDevice.ipAddress}:${targetDevice.port}';
+
+      // Step 1: Handshake
+      final handshakeOk = await _performHandshake(baseUrl, targetDevice.sessionToken, authPin);
+      if (!handshakeOk) {
+        throw const SocketException('Handshake rejected: invalid PIN or authentication token');
+      }
+
+      // Step 2: Send Manifest & Check Resume Offsets
+      final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, filesToSend);
+
+      // Step 3: Stream files chunk by chunk
+      for (final fileItem in filesToSend) {
+        if (_isCanceled) break;
+
+        final startOffset = resumeOffsets[fileItem.fileId] ?? 0;
+        await _streamSingleFile(baseUrl, fileItem, startOffset);
+      }
+
+      return !_isCanceled;
+    } finally {
+      await WakeLockManager.releaseWakeLock();
     }
-
-    // Step 2: Send Manifest & Check Resume Offsets
-    final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, filesToSend);
-
-    // Step 3: Stream files chunk by chunk
-    for (final fileItem in filesToSend) {
-      if (_isCanceled) break;
-
-      final startOffset = resumeOffsets[fileItem.fileId] ?? 0;
-      await _streamSingleFile(baseUrl, fileItem, startOffset);
-    }
-
-    return !_isCanceled;
   }
 
   Future<bool> _performHandshake(String baseUrl, String token, String pin) async {

@@ -8,6 +8,7 @@ import '../../core/models/file_manifest.dart';
 import '../../core/utils/checksum_stream.dart';
 import '../storage/auto_save_router.dart';
 import 'resume_manager.dart';
+import 'wake_lock_manager.dart';
 
 typedef ProgressCallback = void Function(
   String fileId,
