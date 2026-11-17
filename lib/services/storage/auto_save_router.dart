@@ -1,46 +1,47 @@
 import 'dart:io';
-import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/models/file_manifest.dart';
 
-/// Routes received payloads to native OS destinations (Gallery vs. Downloads/UniversalShare).
+typedef MediaNotifyCallback = Future<void> Function(
+  String filePath,
+  FileCategory category,
+  String mimeType,
+);
+
+/// Platform-agnostic Auto-Save Router.
+/// Automatically moves files to the target destination and triggers media scan callbacks.
 class AutoSaveRouter {
-  static const MethodChannel _channel = MethodChannel('com.universal.filetransfer/native');
+  /// Test or environment override for target base directory.
+  static String? overrideBaseDirectory;
+
+  /// Optional platform-specific media indexing handler (e.g. Flutter MethodChannel).
+  static MediaNotifyCallback? platformMediaNotifier;
 
   /// Resolves the dedicated target directory for incoming files.
   static Future<String> getTargetDirectory(FileCategory category) async {
-    try {
-      if (Platform.isAndroid) {
-        final customPath = await _channel.invokeMethod<String>('getUniversalShareDirectory');
-        if (customPath != null && customPath.isNotEmpty) {
-          return customPath;
-        }
+    if (overrideBaseDirectory != null && overrideBaseDirectory!.isNotEmpty) {
+      final dir = Directory('$overrideBaseDirectory/${AppConstants.universalShareFolder}');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
       }
-    } catch (_) {}
+      return dir.path;
+    }
 
-    // Fallback using path_provider
     try {
-      Directory? baseDir;
-      if (Platform.isAndroid) {
-        baseDir = await getExternalStorageDirectory();
-      } else {
-        baseDir = await getApplicationDocumentsDirectory();
-      }
-
-      final targetDir = Directory('${baseDir?.path}/${AppConstants.universalShareFolder}');
+      final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? Directory.systemTemp.path;
+      final targetDir = Directory('$home/Downloads/${AppConstants.universalShareFolder}');
       if (!await targetDir.exists()) {
         await targetDir.create(recursive: true);
       }
       return targetDir.path;
     } catch (_) {
-      final tempDir = await getTemporaryDirectory();
+      final tempDir = Directory.systemTemp;
       return tempDir.path;
     }
   }
 
   /// Automatically moves a successfully received file to its final destination
-  /// and registers it with the OS (Camera Roll / MediaStore).
+  /// and registers it with the OS (Camera Roll / MediaScanner).
   static Future<String> routeReceivedFile({
     required String tempFilePath,
     required String fileName,
@@ -73,27 +74,16 @@ class AutoSaveRouter {
     }
   }
 
-  /// Invokes native platform channels to register media with Camera Roll / MediaScanner.
+  /// Invokes the platform-specific media scanner callback (if configured).
   static Future<void> _notifySystemMedia(
     String filePath,
     FileCategory category,
     String mimeType,
   ) async {
-    try {
-      if (Platform.isIOS) {
-        if (category == FileCategory.photos) {
-          await _channel.invokeMethod('saveImageToGallery', {'path': filePath});
-        } else if (category == FileCategory.videos) {
-          await _channel.invokeMethod('saveVideoToGallery', {'path': filePath});
-        }
-      } else if (Platform.isAndroid) {
-        await _channel.invokeMethod('scanMediaFile', {
-          'path': filePath,
-          'mimeType': mimeType,
-        });
-      }
-    } catch (_) {
-      // Graceful fallback if running in unit test or web sandbox
+    if (platformMediaNotifier != null) {
+      try {
+        await platformMediaNotifier!(filePath, category, mimeType);
+      } catch (_) {}
     }
   }
 }

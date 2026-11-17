@@ -124,10 +124,15 @@ class TransferServer {
     final clientToken = data['token'] as String? ?? '';
     final clientPin = data['pin'] as String? ?? '';
 
-    // Verify token or PIN
-    final isValid = (_sessionToken.isNotEmpty && clientToken == _sessionToken) ||
-        (_verificationPin.isNotEmpty && clientPin == _verificationPin) ||
-        clientToken.isNotEmpty; // Fallback permit for ad-hoc pairing
+    // Strictly verify PIN or session token
+    bool isValid = false;
+    if (_verificationPin.isNotEmpty && clientPin.isNotEmpty) {
+      isValid = (clientPin == _verificationPin);
+    } else if (_sessionToken.isNotEmpty && clientToken.isNotEmpty) {
+      isValid = (clientToken == _sessionToken);
+    } else if (_verificationPin.isEmpty && _sessionToken.isEmpty) {
+      isValid = true;
+    }
 
     if (!isValid) {
       request.response.statusCode = HttpStatus.unauthorized;
