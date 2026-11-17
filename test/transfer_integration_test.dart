@@ -7,6 +7,7 @@ import '../lib/core/models/discovered_device.dart';
 import '../lib/core/models/file_manifest.dart';
 import '../lib/services/transfer/transfer_server.dart';
 import '../lib/services/transfer/transfer_client.dart';
+import '../lib/services/storage/auto_save_router.dart';
 
 void main() {
   group('End-to-End P2P Streaming Transfer Integration Tests', () {
