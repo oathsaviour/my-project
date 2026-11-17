@@ -1,10 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import '../../core/models/discovered_device.dart';
 import '../../core/security/qr_payload.dart';
 import '../../core/security/pin_generator.dart';
 
-/// Abstract discovery contract for peer detection.
 abstract class IDiscoveryService {
   Stream<List<DiscoveredDevice>> get discoveredDevicesStream;
   List<DiscoveredDevice> get currentDevices;
@@ -16,20 +16,25 @@ abstract class IDiscoveryService {
   });
 
   Future<void> stopDiscovery();
-
   void registerManualDevice(DiscoveredDevice device);
 }
 
-/// Central manager orchestrating local network IP resolution, mDNS discovery, and manual QR pairing.
 class DiscoveryManager implements IDiscoveryService {
+  static const int discoveryUdpPort = 52841;
+
   final _devicesController = StreamController<List<DiscoveredDevice>>.broadcast();
   final Map<String, DiscoveredDevice> _devices = {};
+
+  RawDatagramSocket? _udpSocket;
+  Timer? _beaconTimer;
+  Timer? _pruneTimer;
 
   String? _localIp;
   int _transferPort = 52840;
   String _sessionToken = '';
   String _verificationPin = '';
   String _localDeviceName = 'Device';
+  String _localDeviceId = '';
   DeviceOS _localOs = DeviceOS.android;
   bool _isDiscovering = false;
 
@@ -47,7 +52,6 @@ class DiscoveryManager implements IDiscoveryService {
   DeviceOS get localOs => _localOs;
   bool get isDiscovering => _isDiscovering;
 
-  /// Determines the active local IPv4 address (Wi-Fi or Hotspot interface).
   Future<String?> resolveLocalIp() async {
     try {
       final interfaces = await NetworkInterface.list(
@@ -56,20 +60,16 @@ class DiscoveryManager implements IDiscoveryService {
       );
 
       for (final interface in interfaces) {
-        // Prioritize Wi-Fi and hotspot interfaces: wlan, ap, en0, etc.
         final name = interface.name.toLowerCase();
         for (final addr in interface.addresses) {
-          if (!addr.isLoopback) {
-            // Hotspot / Wi-Fi typical subnets: 192.168.*, 172.20.10.*, 10.*
-            if (name.contains('wlan') || name.contains('ap') || name.contains('en0') || name.contains('eth')) {
-              _localIp = addr.address;
-              return _localIp;
-            }
+          if (!addr.isLoopback &&
+              (name.contains('wlan') || name.contains('ap') || name.contains('en0') || name.contains('eth'))) {
+            _localIp = addr.address;
+            return _localIp;
           }
         }
       }
 
-      // Fallback: first non-loopback address
       for (final interface in interfaces) {
         for (final addr in interface.addresses) {
           if (!addr.isLoopback) {
@@ -84,7 +84,6 @@ class DiscoveryManager implements IDiscoveryService {
     return _localIp;
   }
 
-  /// Generates the QR pairing payload for this device.
   QrPairingPayload getLocalQrPayload() {
     return QrPairingPayload(
       ip: _localIp ?? '127.0.0.1',
@@ -107,26 +106,124 @@ class DiscoveryManager implements IDiscoveryService {
     _transferPort = transferPort;
     _sessionToken = PinGenerator.generateSessionToken(16);
     _verificationPin = PinGenerator.generate4DigitPin();
+    _localDeviceId = '${localOs.name}_${DateTime.now().millisecondsSinceEpoch}';
     _isDiscovering = true;
 
     await resolveLocalIp();
+    await _startUdpBeacon();
     _notifyDevices();
+  }
+
+  Future<void> _startUdpBeacon() async {
+    try {
+      _udpSocket?.close();
+      _udpSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        discoveryUdpPort,
+        reuseAddress: true,
+        reusePort: true,
+      );
+      _udpSocket!.broadcastEnabled = true;
+
+      _udpSocket!.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          final datagram = _udpSocket?.receive();
+          if (datagram == null) return;
+          _handleIncomingBeacon(datagram);
+        }
+      });
+
+      // Broadcast our presence every 2 seconds
+      _beaconTimer?.cancel();
+      _beaconTimer = Timer.periodic(const Duration(seconds: 2), (_) => _sendBeacon());
+      _sendBeacon();
+
+      // Remove offline peers after 10 seconds
+      _pruneTimer?.cancel();
+      _pruneTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+        pruneStaleDevices(timeout: const Duration(seconds: 10));
+      });
+    } catch (_) {}
+  }
+
+  void _sendBeacon() async {
+    if (_udpSocket == null || !_isDiscovering) return;
+    await resolveLocalIp();
+
+    final payload = jsonEncode({
+      'magic': 'USHR_DISCOVERY_V1',
+      'id': _localDeviceId,
+      'name': _localDeviceName,
+      'os': _localOs.name,
+      'ip': _localIp ?? '127.0.0.1',
+      'port': _transferPort,
+      'token': _sessionToken,
+      'pin': _verificationPin,
+      'version': '1.0.0',
+    });
+
+    final bytes = utf8.encode(payload);
+
+    // Send to global broadcast and subnet broadcast (for Hotspot / tethering)
+    try {
+      _udpSocket!.send(bytes, InternetAddress('255.255.255.255'), discoveryUdpPort);
+    } catch (_) {}
+
+    if (_localIp != null && _localIp!.contains('.')) {
+      final parts = _localIp!.split('.');
+      if (parts.length == 4) {
+        final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+        try {
+          _udpSocket!.send(bytes, InternetAddress(subnetBroadcast), discoveryUdpPort);
+        } catch (_) {}
+      }
+    }
+  }
+
+  void _handleIncomingBeacon(Datagram datagram) {
+    try {
+      final text = utf8.decode(datagram.data);
+      final data = jsonDecode(text) as Map<String, dynamic>;
+      if (data['magic'] != 'USHR_DISCOVERY_V1') return;
+
+      final senderId = data['id'] as String? ?? '';
+      if (senderId.isEmpty || senderId == _localDeviceId) return;
+
+      final senderIp = datagram.address.address;
+      if (senderIp == _localIp) return;
+
+      final osStr = (data['os'] as String? ?? 'android').toLowerCase();
+      final os = osStr == 'ios' ? DeviceOS.ios : DeviceOS.android;
+
+      final device = DiscoveredDevice(
+        id: senderId,
+        name: data['name'] as String? ?? 'Nearby Device',
+        os: os,
+        ipAddress: senderIp,
+        port: (data['port'] as num?)?.toInt() ?? 52840,
+        sessionToken: data['token'] as String? ?? '',
+        version: data['version'] as String? ?? '1.0.0',
+        lastSeen: DateTime.now(),
+        rssi: -45,
+      );
+
+      addOrUpdateDevice(device);
+    } catch (_) {}
   }
 
   @override
   Future<void> stopDiscovery() async {
     _isDiscovering = false;
+    _beaconTimer?.cancel();
+    _pruneTimer?.cancel();
+    _udpSocket?.close();
+    _udpSocket = null;
     _devices.clear();
     _notifyDevices();
   }
 
-  /// Handles incoming device discovered via mDNS, BLE, or manual network ping.
   void addOrUpdateDevice(DiscoveredDevice device) {
-    // Avoid discovering self
-    if (device.ipAddress == _localIp && device.port == _transferPort) {
-      return;
-    }
-
+    if (device.ipAddress == _localIp && device.port == _transferPort) return;
     _devices[device.id] = device;
     _notifyDevices();
   }
@@ -136,11 +233,13 @@ class DiscoveryManager implements IDiscoveryService {
     addOrUpdateDevice(device);
   }
 
-  /// Removes stale devices that haven't been seen recently.
-  void pruneStaleDevices({Duration timeout = const Duration(seconds: 15)}) {
+  void pruneStaleDevices({Duration timeout = const Duration(seconds: 10)}) {
     final cutoff = DateTime.now().subtract(timeout);
+    final before = _devices.length;
     _devices.removeWhere((_, dev) => dev.lastSeen.isBefore(cutoff));
-    _notifyDevices();
+    if (_devices.length != before) {
+      _notifyDevices();
+    }
   }
 
   void _notifyDevices() {
@@ -150,6 +249,9 @@ class DiscoveryManager implements IDiscoveryService {
   }
 
   void dispose() {
+    _beaconTimer?.cancel();
+    _pruneTimer?.cancel();
+    _udpSocket?.close();
     _devicesController.close();
   }
 }
