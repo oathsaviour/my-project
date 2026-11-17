@@ -21,6 +21,7 @@ void main() {
 
     setUp(() async {
       tempDir = await Directory.systemTemp.createTemp('ushare_e2e_');
+      AutoSaveRouter.overrideBaseDirectory = tempDir.path;
       server = TransferServer();
       serverPort = await server.start(
         sessionToken: sessionToken,
@@ -34,6 +35,7 @@ void main() {
     tearDown(() async {
       await server.stop();
       client.dispose();
+      AutoSaveRouter.overrideBaseDirectory = null;
       if (await tempDir.exists()) {
         await tempDir.delete(recursive: true);
       }
