@@ -1,10 +1,15 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'core/models/discovered_device.dart';
 import 'core/models/file_manifest.dart';
 import 'core/models/transfer_session.dart';
 import 'services/discovery/discovery_service.dart';
 import 'services/storage/auto_save_router.dart';
+import 'services/transfer/transfer_client.dart';
+import 'services/transfer/transfer_server.dart';
 import 'services/transfer/wake_lock_manager.dart';
 import 'ui/screens/file_picker_hub.dart';
 import 'ui/screens/hotspot_guide_screen.dart';
@@ -16,7 +21,6 @@ import 'ui/theme/app_theme.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize native platform channel bridges for MediaStore scoped storage & WakeLock
   const channel = MethodChannel('com.universal.filetransfer/native');
   WakeLockManager.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
   AutoSaveRouter.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
@@ -47,51 +51,75 @@ class MainAppShell extends StatefulWidget {
 
 class _MainAppShellState extends State<MainAppShell> {
   final DiscoveryManager _discoveryManager = DiscoveryManager();
+  final TransferServer _transferServer = TransferServer();
+  final TransferClient _transferClient = TransferClient();
   TransferSession? _activeSession;
-
-  // Sample peers for instant interaction & testing
-  final List<DiscoveredDevice> _mockPeers = [
-    DiscoveredDevice(
-      id: 'mock_iphone_16_pro',
-      name: "Alex's iPhone 16 Pro",
-      os: DeviceOS.ios,
-      ipAddress: '192.168.1.108',
-      port: 52840,
-      sessionToken: 'auth_ios_9421',
-      version: '1.0.0',
-      lastSeen: DateTime.now(),
-      rssi: -52,
-    ),
-    DiscoveredDevice(
-      id: 'mock_pixel_9_pro',
-      name: 'Pixel 9 Pro XL',
-      os: DeviceOS.android,
-      ipAddress: '192.168.1.115',
-      port: 52840,
-      sessionToken: 'auth_android_7190',
-      version: '1.0.0',
-      lastSeen: DateTime.now(),
-      rssi: -48,
-    ),
-  ];
 
   @override
   void initState() {
     super.initState();
-    _startDiscovery();
+    _initServices();
   }
 
-  void _startDiscovery() async {
+  Future<void> _initServices() async {
+    await _requestRuntimePermissions();
+
+    const channel = MethodChannel('com.universal.filetransfer/native');
+    try {
+      await channel.invokeMethod('acquireMulticastLock');
+    } catch (_) {}
+
+    final tempDir = await getTemporaryDirectory();
+    final localOs = Platform.isIOS ? DeviceOS.ios : DeviceOS.android;
+    final deviceName = Platform.isIOS ? 'iPhone (Universal)' : 'Android (${Platform.localHostname})';
+
     await _discoveryManager.startDiscovery(
-      localDeviceName: 'Pixel 9 / iPhone Device',
-      localOs: DeviceOS.android,
+      localDeviceName: deviceName,
+      localOs: localOs,
       transferPort: 52840,
     );
+
+    _transferServer.onFileCompleted = (fileId, finalPath, sha256) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('File received & saved: $finalPath')),
+      );
+    };
+
+    await _transferServer.start(
+      sessionToken: _discoveryManager.sessionToken,
+      verificationPin: '',
+      tempStorageDir: tempDir.path,
+      initialPort: 52840,
+    );
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _requestRuntimePermissions() async {
+    if (Platform.isAndroid) {
+      await [
+        Permission.nearbyWifiDevices,
+        Permission.locationWhenInUse,
+        Permission.camera,
+        Permission.photos,
+        Permission.videos,
+        Permission.audio,
+        Permission.storage,
+      ].request();
+    } else if (Platform.isIOS) {
+      await [
+        Permission.camera,
+        Permission.photos,
+      ].request();
+    }
   }
 
   @override
   void dispose() {
     _discoveryManager.dispose();
+    _transferServer.stop();
+    _transferClient.dispose();
     super.dispose();
   }
 
@@ -114,7 +142,7 @@ class _MainAppShellState extends State<MainAppShell> {
       sessionId: 'sess_${DateTime.now().millisecondsSinceEpoch}',
       peer: peer,
       direction: TransferDirection.outgoing,
-      authPin: '4829',
+      authPin: '',
       files: files,
       startTime: DateTime.now(),
     );
@@ -123,21 +151,49 @@ class _MainAppShellState extends State<MainAppShell> {
       _activeSession = session;
     });
 
+    _transferClient.onProgress = (fileId, transferred, total, speedMb, eta, status) {
+      if (!mounted || _activeSession == null) return;
+      final updatedFiles = _activeSession!.files.map((f) {
+        if (f.fileId == fileId) {
+          return f.copyWith(transferredBytes: transferred, status: status);
+        }
+        return f;
+      }).toList();
+
+      setState(() {
+        _activeSession = _activeSession!.copyWith(
+          files: updatedFiles,
+          currentSpeedMbPerSec: speedMb,
+          estimatedTimeRemaining: eta,
+        );
+      });
+    };
+
+    _transferClient.sendFiles(
+      targetDevice: peer,
+      senderName: _discoveryManager.localDeviceName,
+      authPin: '',
+      filesToSend: files,
+    );
+
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => TransferQueueScreen(
           session: _activeSession!,
           onPause: () {
+            _transferClient.pause();
             setState(() {
               _activeSession = _activeSession?.copyWith(isPaused: true);
             });
           },
           onResume: () {
+            _transferClient.resume();
             setState(() {
               _activeSession = _activeSession?.copyWith(isPaused: false);
             });
           },
           onCancel: () {
+            _transferClient.cancel();
             setState(() {
               _activeSession = null;
             });
@@ -163,6 +219,7 @@ class _MainAppShellState extends State<MainAppShell> {
         localPayload: _discoveryManager.getLocalQrPayload(),
         onPeerScanned: (payload) {
           final device = payload.toDiscoveredDevice();
+          _discoveryManager.registerManualDevice(device);
           _onSelectDevice(device);
         },
       ),
@@ -179,9 +236,9 @@ class _MainAppShellState extends State<MainAppShell> {
   Widget build(BuildContext context) {
     return StreamBuilder<List<DiscoveredDevice>>(
       stream: _discoveryManager.discoveredDevicesStream,
-      initialData: _mockPeers,
+      initialData: _discoveryManager.currentDevices,
       builder: (context, snapshot) {
-        final devices = snapshot.data?.isNotEmpty == true ? snapshot.data! : _mockPeers;
+        final devices = snapshot.data ?? [];
 
         return RadarScreen(
           discoveredDevices: devices,
