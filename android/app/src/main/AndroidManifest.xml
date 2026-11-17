@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.universal.filetransfer">
+    <!--package="com.universal.filetransfer"> -->
 
     <!-- Network & Local Wi-Fi Discovery Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
