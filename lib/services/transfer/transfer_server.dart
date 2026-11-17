@@ -174,6 +174,9 @@ class TransferServer {
       }
     }
 
+    // Keep CPU and screen awake while receiving chunks
+    await WakeLockManager.acquireWakeLock(reason: 'Receiving incoming file batch');
+
     final responseFiles = <Map<String, dynamic>>[];
 
     for (final item in manifestItems) {
@@ -375,6 +378,11 @@ class TransferServer {
 
     if (onFileCompleted != null) {
       onFileCompleted!(fileId, finalSavedPath, computedSha256);
+    }
+
+    // Release wake lock if all files in the batch are finished
+    if (_activeFiles.values.every((f) => f.status == TransferStatus.completed)) {
+      await WakeLockManager.releaseWakeLock();
     }
 
     request.response.statusCode = HttpStatus.ok;
