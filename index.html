@@ -1276,13 +1276,28 @@
     function togglePause() {
       isPaused = !isPaused;
       document.getElementById('pause-btn').innerText = isPaused ? '▶ Resume' : '⏸ Pause';
+      const wlPill = document.getElementById('wakelock-status-pill');
       if (isPaused) {
         document.getElementById('speed-display').innerText = '0.0 MB/s (Paused)';
+        if (wlPill) {
+          wlPill.innerHTML = '⚡ WakeLock: Inactive (Paused)';
+          wlPill.style.color = 'var(--text-muted)';
+        }
+      } else {
+        if (wlPill) {
+          wlPill.innerHTML = '⚡ WakeLock: Active';
+          wlPill.style.color = 'var(--neon-cyan)';
+        }
       }
     }
 
     function cancelTransfer() {
       clearInterval(transferInterval);
+      const wlPill = document.getElementById('wakelock-status-pill');
+      if (wlPill) {
+        wlPill.innerHTML = '⚡ WakeLock: Inactive';
+        wlPill.style.color = 'var(--text-muted)';
+      }
       switchView('view-picker');
     }
 
@@ -1291,6 +1306,11 @@
       document.getElementById('eta-display').innerText = '00:00';
       document.getElementById('checksum-status-pill').className = 'checksum-badge';
       document.getElementById('checksum-status-pill').innerHTML = '✅ Full-File SHA-256 Verified';
+      const wlPill = document.getElementById('wakelock-status-pill');
+      if (wlPill) {
+        wlPill.innerHTML = '⚡ WakeLock: Released';
+        wlPill.style.color = 'var(--text-muted)';
+      }
 
       setTimeout(() => {
         alert('🎉 All raw files transferred and verified bit-for-bit via SHA-256! Auto-saved to native Gallery & UniversalShare.');

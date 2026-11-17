@@ -77,29 +77,41 @@ All unit and integration tests are self-contained and verify:
 - QR pairing URI encoder and decoder (`ushare://pair?...`).
 - Sliding-window transfer throughput (MB/s) and dynamic ETA calculation.
 - End-to-end P2P server handshake and transfer completion.
+- Screen and CPU WakeLock reference counting, acquisition, and release.
+- Android Scoped Storage MediaStore auto-routing and filename collision handling.
 
 To run the test suite:
 ```bash
 cd test_runner
 dart test
 ```
-Result: **14 / 14 tests passing.**
+Result: **17 / 17 tests passing.**
 
 ---
 
-## 5. Native OS Permissions & Configurations
+## 5. Native OS Permissions, Scoped Storage & Build Configurations
 
-### Android (`android/app/src/main/AndroidManifest.xml`)
-- `NEARBY_WIFI_DEVICES` (Android 13+ with `neverForLocation` flag).
-- `CHANGE_WIFI_MULTICAST_STATE` (critical for receiving mDNS packets).
-- `BLUETOOTH_SCAN`, `BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT`.
-- `READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, `READ_MEDIA_AUDIO` (Android 13+ granular media access).
-- `MANAGE_EXTERNAL_STORAGE` (raw APK and document saving).
-- Custom `network_security_config.xml` permitting cleartext HTTP over private subnets (`192.168.0.0/16`, `172.20.10.0/24`, `10.0.0.0/8`).
+### 5.1 Android Build & Scoped Storage (`android/app/build.gradle` & `MainActivity.kt`)
+- **Gradle Readiness:**
+  - `compileSdk = 35` (Android 15 / 16 ready)
+  - `minSdk = 24` (Android 7.0+, ensuring modern TLS 1.3, `java.nio` channels, and MediaStore)
+  - `targetSdk = 35`
+  - Java 17 and Kotlin 1.9.24 compatibility
+- **Google Play Compliant Scoped Storage (Zero `MANAGE_EXTERNAL_STORAGE`):**
+  - Documents, APKs, and raw files are saved to `Download/UniversalShare/` via `MediaStore.Downloads` using ContentResolver and `IS_PENDING` control.
+  - Photos and 4K videos are saved to `Pictures/UniversalShare/` and `Movies/UniversalShare/` via `MediaStore.Images` / `MediaStore.Video`.
+  - Avoids `MANAGE_EXTERNAL_STORAGE` completely, passing Google Play store automated review checks.
+- **WakeLock & Background Keep-Alive:**
+  - `FLAG_KEEP_SCREEN_ON` on the Window prevents screen auto-lock.
+  - `PowerManager.PARTIAL_WAKE_LOCK` prevents Android Doze mode CPU suspension from terminating TCP sockets during multi-GB transfers.
 
-### iOS (`ios/Runner/Info.plist`)
-- `NSLocalNetworkUsageDescription` (triggers system prompt for local network access).
-- `NSBonjourServices`: registers `_universal-share._tcp` and `_filetransfer._tcp`.
-- `NSPhotoLibraryUsageDescription` & `NSPhotoLibraryAddUsageDescription` (Camera Roll auto-save).
-- `UIFileSharingEnabled` & `LSSupportsOpeningDocumentsInPlace` (Files app integration).
-- `CFBundleURLTypes` for custom scheme `ushare://`.
+### 5.2 iOS Build & Background Keep-Alive (`ios/Podfile` & `AppDelegate.swift`)
+- **CocoaPods Readiness:**
+  - Platform target set to `platform :ios, '13.0'` in `ios/Podfile`.
+  - `post_install` hook forces `IPHONEOS_DEPLOYMENT_TARGET = '13.0'` and disables Bitcode across all third-party pods.
+- **WakeLock & Background Execution:**
+  - `UIApplication.shared.isIdleTimerDisabled = true` keeps the screen awake during active transfers.
+  - `UIApplication.shared.beginBackgroundTask` requests background CPU execution time if the user switches apps or device locks.
+- **PhotoKit & File Sharing:**
+  - `PHPhotoLibrary` saves received images and videos directly to the iOS Camera Roll.
+  - `UIFileSharingEnabled` & `LSSupportsOpeningDocumentsInPlace` expose received documents in the Apple Files app and Finder.
