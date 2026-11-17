@@ -1,0 +1,33 @@
+name: universal_file_transfer
+description: "Universal Cross-Platform Peer-to-Peer File Transfer App (Android <-> iOS)"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  crypto: ^3.0.3
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^5.2.3
+  path_provider: ^2.1.4
+  mime: ^1.0.5
+  intl: ^0.19.0
+  uuid: ^4.4.0
+  permission_handler: ^11.3.1
+  share_plus: ^9.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  test: ^1.25.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/
