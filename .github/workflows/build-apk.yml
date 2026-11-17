@@ -24,12 +24,8 @@ jobs:
           flutter create . --platforms=android
           sed -i 's/namespace = ".*"/namespace = "com.universal.filetransfer"/' android/app/build.gradle.kts
           sed -i 's/applicationId = ".*"/applicationId = "com.universal.filetransfer"/' android/app/build.gradle.kts
-          sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
+          sed -i 's/compileSdk = .*/compileSdk = 35/' android/app/build.gradle.kts
           sed -i 's/minSdk = .*/minSdk = 24/' android/app/build.gradle.kts
-          
-          # Force all subprojects/plugins to compile against SDK 36 to satisfy file_picker & wakelock_plus metadata checks
-          echo -e '\nallprojects {\n    afterEvaluate {\n        project ->\n            if (project.hasProperty("android")) {\n                project.android {\n                    if (namespace == null) {\n                        namespace project.group\n                    }\n                    compileSdk = 36\n                }\n            }\n    }\n}' >> android/build.gradle.kts
-
           FLUTTER_SDK=$(dirname $(dirname $(which flutter)))
           echo "flutter.sdk=$FLUTTER_SDK" > android/local.properties
       - run: flutter pub get
