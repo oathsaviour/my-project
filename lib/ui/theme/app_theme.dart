@@ -25,7 +25,7 @@ class AppTheme {
         background: darkBackground,
         error: Color(0xFFFF5252),
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: darkCard,
         elevation: 0,
         shape: RoundedRectangleBorder(
