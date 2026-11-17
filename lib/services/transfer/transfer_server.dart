@@ -398,6 +398,7 @@ class TransferServer {
 
   /// Shuts down the server and cleans up active handles.
   Future<void> stop() async {
+    await WakeLockManager.forceReleaseAll();
     for (final raf in _openFileHandles.values) {
       try {
         await raf.close();
