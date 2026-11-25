@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -12,11 +13,15 @@ enum _PairingTab { myQr, scanQr, manualIp }
 class QrPairingModal extends StatefulWidget {
   final QrPairingPayload localPayload;
   final ValueChanged<QrPairingPayload> onPeerScanned;
+  final Future<QrPairingPayload?> Function()? onStartOfflineHotspot;
+  final Future<bool> Function()? requestCameraPermission;
 
   const QrPairingModal({
     super.key,
     required this.localPayload,
     required this.onPeerScanned,
+    this.onStartOfflineHotspot,
+    this.requestCameraPermission,
   });
 
   @override
@@ -25,22 +30,44 @@ class QrPairingModal extends StatefulWidget {
 
 class _QrPairingModalState extends State<QrPairingModal> {
   _PairingTab _activeTab = _PairingTab.myQr;
+  late QrPairingPayload _displayPayload;
   final TextEditingController _manualIpController = TextEditingController();
   final TextEditingController _manualPortController = TextEditingController(text: '52840');
   final TextEditingController _manualPinController = TextEditingController();
+
   MobileScannerController? _scannerController;
   bool _hasHandledScan = false;
   bool _hasCameraPermission = false;
   bool _isCheckingCamera = false;
+  bool _isStartingHotspot = false;
   String? _scanError;
 
   @override
+  void initState() {
+    super.initState();
+    _displayPayload = widget.localPayload;
+  }
+
+  @override
   void dispose() {
-    _scannerController?.dispose();
+    _disposeScanner();
     _manualIpController.dispose();
     _manualPortController.dispose();
     _manualPinController.dispose();
     super.dispose();
+  }
+
+  Future<void> _disposeScanner() async {
+    final controller = _scannerController;
+    _scannerController = null;
+    if (controller != null) {
+      try {
+        await controller.stop();
+      } catch (_) {}
+      try {
+        await controller.dispose();
+      } catch (_) {}
+    }
   }
 
   Future<void> _selectTab(_PairingTab tab) async {
@@ -53,35 +80,75 @@ class _QrPairingModalState extends State<QrPairingModal> {
     if (tab == _PairingTab.scanQr) {
       await _ensureCameraAndStartScanner();
     } else {
-      await _scannerController?.stop();
-      await _scannerController?.dispose();
-      _scannerController = null;
+      await _disposeScanner();
+      if (mounted) {
+        setState(() {
+          _hasCameraPermission = false;
+        });
+      }
     }
   }
 
   Future<void> _ensureCameraAndStartScanner() async {
-    setState(() => _isCheckingCamera = true);
-    final status = await Permission.camera.request();
+    setState(() {
+      _isCheckingCamera = true;
+      _hasCameraPermission = false;
+      _scanError = null;
+    });
+
+    final granted = widget.requestCameraPermission != null
+        ? await widget.requestCameraPermission!()
+        : (await Permission.camera.request()).isGranted;
+
     if (!mounted) return;
 
-    if (status.isGranted) {
-      _scannerController?.dispose();
-      _scannerController = MobileScannerController(
+    if (granted) {
+      // Wait briefly for the Android runtime permission dialog to finish detaching
+      // from the Activity lifecycle before initializing CameraX / MobileScanner.
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted || _activeTab != _PairingTab.scanQr) return;
+
+      await _disposeScanner();
+      final controller = MobileScannerController(
+        autoStart: false,
         detectionSpeed: DetectionSpeed.normal,
         facing: CameraFacing.back,
       );
+      _scannerController = controller;
+
       setState(() {
         _hasCameraPermission = true;
         _isCheckingCamera = false;
         _scanError = null;
       });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startScannerSafely(controller);
+      });
     } else {
+      final permanentlyDenied = widget.requestCameraPermission == null &&
+          await Permission.camera.isPermanentlyDenied;
+      if (!mounted) return;
       setState(() {
         _hasCameraPermission = false;
         _isCheckingCamera = false;
-        _scanError = status.isPermanentlyDenied
+        _scanError = permanentlyDenied
             ? 'Camera permission permanently denied. Enable it in App Settings to scan QR codes.'
             : 'Camera permission is required only when scanning a QR code.';
+      });
+    }
+  }
+
+  Future<void> _startScannerSafely(MobileScannerController controller) async {
+    if (!mounted || _scannerController != controller || _activeTab != _PairingTab.scanQr) {
+      return;
+    }
+    try {
+      await controller.start();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _scanError = 'Could not start camera preview: $e';
       });
     }
   }
@@ -94,7 +161,7 @@ class _QrPairingModalState extends State<QrPairingModal> {
       final parsed = QrPairingPayload.parse(raw);
       if (parsed != null) {
         _hasHandledScan = true;
-        _scannerController?.stop();
+        _disposeScanner();
         Navigator.of(context).pop();
         widget.onPeerScanned(parsed);
         return;
@@ -103,6 +170,26 @@ class _QrPairingModalState extends State<QrPairingModal> {
           _scanError = 'Not a valid Universal Transfer QR code';
         });
       }
+    }
+  }
+
+  Future<void> _enableOfflineHotspotQr() async {
+    if (widget.onStartOfflineHotspot == null || _isStartingHotspot) return;
+    setState(() => _isStartingHotspot = true);
+    try {
+      final updated = await widget.onStartOfflineHotspot!();
+      if (!mounted) return;
+      if (updated != null) {
+        setState(() {
+          _displayPayload = updated;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not start Offline Hotspot. Check Wi-Fi & Location.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isStartingHotspot = false);
     }
   }
 
@@ -139,7 +226,6 @@ class _QrPairingModalState extends State<QrPairingModal> {
             ),
             const SizedBox(height: 16),
 
-            // Switcher between My QR, Scan QR, and Manual IP
             Row(
               children: [
                 _buildTabChip('My QR', _PairingTab.myQr),
@@ -159,7 +245,7 @@ class _QrPairingModalState extends State<QrPairingModal> {
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: QrImageView(
-                  data: widget.localPayload.toUriString(),
+                  data: _displayPayload.toUriString(),
                   version: QrVersions.auto,
                   size: 200.0,
                   backgroundColor: Colors.white,
@@ -174,7 +260,7 @@ class _QrPairingModalState extends State<QrPairingModal> {
                     style: TextStyle(color: AppTheme.textSecondary, fontSize: 14),
                   ),
                   Text(
-                    widget.localPayload.pin,
+                    _displayPayload.pin,
                     style: const TextStyle(
                       color: AppTheme.accentNeon,
                       fontSize: 22,
@@ -186,14 +272,31 @@ class _QrPairingModalState extends State<QrPairingModal> {
               ),
               const SizedBox(height: 8),
               Text(
-                'IP: ${widget.localPayload.ip}:${widget.localPayload.port}',
+                'IP: ${_displayPayload.ip}:${_displayPayload.port}',
                 style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
               ),
-              if (widget.localPayload.ip == '127.0.0.1') ...[
-                const SizedBox(height: 8),
-                const Text(
-                  'Connect to Wi-Fi or a Hotspot to expose your LAN IP.',
-                  style: TextStyle(color: AppTheme.warningAmber, fontSize: 12),
+              if (_displayPayload.wifiSsid != null && _displayPayload.wifiSsid!.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'Offline Hotspot: ${_displayPayload.wifiSsid}',
+                  style: const TextStyle(color: AppTheme.accentGreen, fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+              ] else if (widget.onStartOfflineHotspot != null) ...[
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.accentNeon,
+                    side: const BorderSide(color: AppTheme.accentNeon),
+                  ),
+                  icon: _isStartingHotspot
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.accentNeon),
+                        )
+                      : const Icon(Icons.wifi_tethering, size: 18),
+                  label: Text(_isStartingHotspot ? 'Starting Offline Hotspot...' : 'Create Offline Hotspot QR (No Router)'),
+                  onPressed: _isStartingHotspot ? null : _enableOfflineHotspotQr,
                 ),
               ],
             ] else if (_activeTab == _PairingTab.scanQr) ...[
@@ -248,7 +351,8 @@ class _QrPairingModalState extends State<QrPairingModal> {
                       const SizedBox(height: 12),
                       ElevatedButton(
                         onPressed: () async {
-                          if (await Permission.camera.isPermanentlyDenied) {
+                          if (widget.requestCameraPermission == null &&
+                              await Permission.camera.isPermanentlyDenied) {
                             await openAppSettings();
                           } else {
                             await _ensureCameraAndStartScanner();

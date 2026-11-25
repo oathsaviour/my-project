@@ -29,7 +29,8 @@ class TransferQueueScreen extends StatelessWidget {
     final activeFile = session.activeFile;
     final isIos = session.peer.os == DeviceOS.ios;
     final peerColor = isIos ? AppTheme.appleBlue : AppTheme.androidGreen;
-    final allFinished = session.isCompleted ||
+    final allFinished = session.files.isEmpty ||
+        session.isCompleted ||
         session.files.every((f) => f.isCompleted || f.status == TransferStatus.failed);
 
     return PopScope(
@@ -173,9 +174,8 @@ class TransferQueueScreen extends StatelessWidget {
             ),
             const SizedBox(height: 16),
 
-            // Control Buttons
-            if (!session.isCompleted &&
-                !session.files.every((f) => f.isCompleted || f.status == TransferStatus.failed))
+            // Control Buttons (Two-way Send Files always available in a trusted session when idle/finished)
+            if (session.files.isNotEmpty && !allFinished)
               if (session.direction == TransferDirection.outgoing)
                 Row(
                   children: [
@@ -219,17 +219,20 @@ class TransferQueueScreen extends StatelessWidget {
             else
               Row(
                 children: [
-                  if (session.direction == TransferDirection.outgoing && onSendMore != null) ...[
+                  if (onSendMore != null) ...[
                     Expanded(
-                      child: OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppTheme.accentNeon,
-                          side: const BorderSide(color: AppTheme.accentNeon),
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.accentNeon,
+                          foregroundColor: AppTheme.darkBackground,
                           padding: const EdgeInsets.symmetric(vertical: 16),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
-                        icon: const Icon(Icons.add_circle_outline, size: 20),
-                        label: const Text('Send More', style: TextStyle(fontWeight: FontWeight.bold)),
+                        icon: const Icon(Icons.upload_file, size: 20),
+                        label: Text(
+                          session.files.isEmpty ? 'Send Files' : 'Send More',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
                         onPressed: onSendMore,
                       ),
                     ),
@@ -238,14 +241,23 @@ class TransferQueueScreen extends StatelessWidget {
                   Expanded(
                     child: ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: session.isCompleted ? AppTheme.accentGreen : Colors.redAccent,
-                        foregroundColor: session.isCompleted ? AppTheme.darkBackground : Colors.white,
+                        backgroundColor: session.files.isEmpty || session.isCompleted
+                            ? AppTheme.accentGreen
+                            : Colors.redAccent,
+                        foregroundColor: session.files.isEmpty || session.isCompleted
+                            ? AppTheme.darkBackground
+                            : Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
-                      icon: Icon(session.isCompleted ? Icons.check_circle : Icons.error_outline, size: 22),
+                      icon: Icon(
+                        session.files.isEmpty || session.isCompleted
+                            ? Icons.check_circle
+                            : Icons.error_outline,
+                        size: 22,
+                      ),
                       label: Text(
-                        session.isCompleted ? 'Done' : 'Close',
+                        session.files.isEmpty ? 'End Session' : (session.isCompleted ? 'Done' : 'Close'),
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                       ),
                       onPressed: onDone,

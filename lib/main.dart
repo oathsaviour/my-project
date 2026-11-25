@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'core/models/discovered_device.dart';
 import 'core/models/file_manifest.dart';
 import 'core/models/transfer_session.dart';
+import 'core/security/qr_payload.dart';
 import 'core/utils/formatters.dart';
 import 'core/utils/speed_calculator.dart';
 import 'services/discovery/discovery_service.dart';
@@ -26,6 +27,7 @@ void main() {
   const channel = MethodChannel('com.universal.filetransfer/native');
   WakeLockManager.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
   AutoSaveRouter.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
+  DiscoveryManager.nativeChannelInvoker = <T>(method, [args]) => channel.invokeMethod<T>(method, args);
 
   runApp(const UniversalTransferApp());
 }
@@ -51,26 +53,54 @@ class MainAppShell extends StatefulWidget {
   State<MainAppShell> createState() => _MainAppShellState();
 }
 
-class _MainAppShellState extends State<MainAppShell> {
+class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver {
+  static const _channel = MethodChannel('com.universal.filetransfer/native');
+
   final DiscoveryManager _discoveryManager = DiscoveryManager();
   final TransferServer _transferServer = TransferServer();
   final TransferClient _transferClient = TransferClient();
   final ValueNotifier<TransferSession?> _activeSessionNotifier = ValueNotifier<TransferSession?>(null);
   final SpeedCalculator _incomingSpeedCalculator = SpeedCalculator();
 
+  RadioStates? _radioStates;
+  bool _isQueueScreenOpen = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _channel.setMethodCallHandler(_handleNativeCallback);
     _initServices();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _discoveryManager.refreshDiscovery().then((_) async {
+        final states = await _discoveryManager.checkRadioStates();
+        if (mounted) setState(() => _radioStates = states);
+      });
+    }
+  }
+
+  Future<dynamic> _handleNativeCallback(MethodCall call) async {
+    final args = call.arguments as Map<dynamic, dynamic>?;
+    if (args == null) return;
+    switch (call.method) {
+      case 'onNsdPeerFound':
+        _discoveryManager.handleNativeNsdPeer(args);
+        break;
+      case 'onP2pPeerFound':
+        _discoveryManager.handleNativeP2pPeer(args);
+        break;
+      case 'onBlePeerFound':
+        _discoveryManager.handleNativeBlePeer(args);
+        break;
+    }
   }
 
   Future<void> _initServices() async {
     await _requestRuntimePermissions();
-
-    const channel = MethodChannel('com.universal.filetransfer/native');
-    try {
-      await channel.invokeMethod('acquireMulticastLock');
-    } catch (_) {}
 
     final tempDir = await getTemporaryDirectory();
     final localOs = Platform.isIOS ? DeviceOS.ios : DeviceOS.android;
@@ -82,6 +112,9 @@ class _MainAppShellState extends State<MainAppShell> {
       transferPort: 52840,
     );
 
+    final states = await _discoveryManager.checkRadioStates();
+
+    _transferServer.onSessionRequested = _handleIncomingSessionRequest;
     _transferServer.onManifestReceived = _handleIncomingManifest;
     _transferServer.onProgress = _handleIncomingProgress;
     _transferServer.onFileCompleted = _handleIncomingFileCompleted;
@@ -93,9 +126,75 @@ class _MainAppShellState extends State<MainAppShell> {
       initialPort: 52840,
     );
 
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() => _radioStates = states);
+    }
   }
 
+  /// Mutual one-time approval on receiver when a peer initiates a session.
+  Future<bool> _handleIncomingSessionRequest(
+    String sessionId,
+    String peerName,
+    String peerOs,
+    String peerIp,
+    int peerPort,
+    String authPin,
+  ) async {
+    if (!mounted) return false;
+
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.darkSurface,
+        title: const Text('Connection Request', style: TextStyle(color: AppTheme.textPrimary)),
+        content: Text(
+          '$peerName ($peerIp) wants to establish a two-way file sharing session.\n\n'
+          'Once accepted, both devices can send and receive files freely without repeated prompts.',
+          style: const TextStyle(color: AppTheme.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Decline', style: TextStyle(color: Colors.redAccent)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.accentNeon,
+              foregroundColor: AppTheme.darkBackground,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Accept'),
+          ),
+        ],
+      ),
+    );
+
+    if (accepted == true && mounted) {
+      final peer = DiscoveredDevice(
+        id: 'trusted_$peerIp',
+        name: peerName,
+        os: DeviceOS.fromString(peerOs),
+        ipAddress: peerIp,
+        port: peerPort,
+        sessionToken: '',
+        lastSeen: DateTime.now(),
+      );
+      _activeSessionNotifier.value = TransferSession(
+        sessionId: sessionId,
+        peer: peer,
+        direction: TransferDirection.incoming,
+        authPin: authPin,
+        files: const [],
+        startTime: DateTime.now(),
+      );
+      _openSessionWorkspace();
+    }
+
+    return accepted == true;
+  }
+
+  /// Fallback per-batch prompt only if sender did not establish a trusted session first.
   Future<bool> _handleIncomingManifest(
     String senderName,
     List<FileManifestItem> files,
@@ -103,16 +202,25 @@ class _MainAppShellState extends State<MainAppShell> {
   ) async {
     if (!mounted) return false;
 
+    final existing = _activeSessionNotifier.value;
+    if (existing != null && _transferServer.isSessionTrusted(existing.sessionId)) {
+      _incomingSpeedCalculator.reset();
+      _activeSessionNotifier.value = existing.copyWith(
+        direction: TransferDirection.incoming,
+        files: files,
+        startTime: DateTime.now(),
+      );
+      _openSessionWorkspace();
+      return true;
+    }
+
     final totalBytes = files.fold<int>(0, (sum, f) => sum + f.fileSize);
     final accepted = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.darkSurface,
-        title: const Text(
-          'Incoming File Transfer',
-          style: TextStyle(color: AppTheme.textPrimary),
-        ),
+        title: const Text('Incoming File Transfer', style: TextStyle(color: AppTheme.textPrimary)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -158,7 +266,7 @@ class _MainAppShellState extends State<MainAppShell> {
 
     if (accepted == true && mounted) {
       _incomingSpeedCalculator.reset();
-      final incomingSession = TransferSession(
+      _activeSessionNotifier.value = TransferSession(
         sessionId: 'recv_${DateTime.now().millisecondsSinceEpoch}',
         peer: DiscoveredDevice(
           id: 'incoming_peer',
@@ -175,8 +283,7 @@ class _MainAppShellState extends State<MainAppShell> {
         files: files,
         startTime: DateTime.now(),
       );
-      _activeSessionNotifier.value = incomingSession;
-      _pushTransferQueueScreen();
+      _openSessionWorkspace();
     }
 
     return accepted == true;
@@ -255,6 +362,9 @@ class _MainAppShellState extends State<MainAppShell> {
     if (Platform.isAndroid) {
       await [
         Permission.nearbyWifiDevices,
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.bluetoothAdvertise,
         Permission.locationWhenInUse,
         Permission.photos,
         Permission.videos,
@@ -270,6 +380,7 @@ class _MainAppShellState extends State<MainAppShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _activeSessionNotifier.dispose();
     _discoveryManager.dispose();
     _transferServer.stop();
@@ -277,73 +388,161 @@ class _MainAppShellState extends State<MainAppShell> {
     super.dispose();
   }
 
-  void _onSelectDevice(DiscoveredDevice device, {String authPin = ''}) {
+  /// Mutual one-time pairing flow before opening the bidirectional session workspace.
+  Future<void> _onSelectDevice(DiscoveredDevice device, {String authPin = ''}) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.darkSurface,
+        title: const Text('Connection Request', style: TextStyle(color: AppTheme.textPrimary)),
+        content: Text(
+          'Connect to ${device.name} (${device.transport.badgeLabel}) for two-way file sharing?',
+          style: const TextStyle(color: AppTheme.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.accentNeon,
+              foregroundColor: AppTheme.darkBackground,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) return;
+
+    DiscoveredDevice target = device;
+
+    // If discovered via Wi-Fi Direct / BLE without an IP yet, form P2P group first
+    if (target.ipAddress.isEmpty && target.p2pAddress != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connecting via Wi-Fi Direct to ${target.name}...')),
+      );
+      final groupOwnerIp = await _discoveryManager.connectP2pPeer(target.p2pAddress!);
+      if (!mounted) return;
+      if (groupOwnerIp == null || groupOwnerIp.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Wi-Fi Direct pairing failed. Try QR code or Hotspot.')),
+        );
+        return;
+      }
+      target = target.copyWith(ipAddress: groupOwnerIp);
+    }
+
+    final sessionId = 'sess_${DateTime.now().millisecondsSinceEpoch}';
+    final peerToken = await _transferClient.requestMutualSession(
+      targetDevice: target,
+      sessionId: sessionId,
+      localName: _discoveryManager.localDeviceName,
+      localOs: _discoveryManager.localOs,
+      localIp: _discoveryManager.localIp ?? '',
+      localPort: _transferServer.port,
+      authPin: authPin,
+    );
+
+    if (!mounted) return;
+    if (peerToken == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Peer declined or could not be reached.')),
+      );
+      return;
+    }
+
+    _transferServer.trustSession(sessionId);
+    final trustedTarget = peerToken.isNotEmpty ? target.copyWith(sessionToken: peerToken) : target;
+
+    _activeSessionNotifier.value = TransferSession(
+      sessionId: sessionId,
+      peer: trustedTarget,
+      direction: TransferDirection.outgoing,
+      authPin: authPin,
+      files: const [],
+      startTime: DateTime.now(),
+    );
+
+    _openFilePickerForSession(trustedTarget, sessionId, authPin);
+  }
+
+  void _openFilePickerForSession(DiscoveredDevice peer, String sessionId, String authPin) {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FilePickerHubScreen(
-          targetDevice: device,
+          targetDevice: peer,
           onConfirmSend: (selectedFiles) {
             Navigator.of(context).pop();
-            _startTransferSession(device, selectedFiles, authPin: authPin);
+            _startTransferBatch(peer, selectedFiles, sessionId: sessionId, authPin: authPin);
           },
         ),
       ),
     );
   }
 
-  void _pushTransferQueueScreen() {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ValueListenableBuilder<TransferSession?>(
-          valueListenable: _activeSessionNotifier,
-          builder: (context, session, __) {
-            if (session == null) {
-              return const Scaffold(
-                body: Center(child: CircularProgressIndicator()),
-              );
-            }
-            return TransferQueueScreen(
-              session: session,
-              onPause: () {
-                _transferClient.pause();
-                _activeSessionNotifier.value = session.copyWith(isPaused: true);
+  void _openSessionWorkspace() {
+    if (_isQueueScreenOpen || !mounted) return;
+    _isQueueScreenOpen = true;
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => ValueListenableBuilder<TransferSession?>(
+              valueListenable: _activeSessionNotifier,
+              builder: (context, session, __) {
+                if (session == null) {
+                  return const Scaffold(
+                    body: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                return TransferQueueScreen(
+                  session: session,
+                  onPause: () {
+                    _transferClient.pause();
+                    _activeSessionNotifier.value = session.copyWith(isPaused: true);
+                  },
+                  onResume: () {
+                    _transferClient.resume();
+                    _activeSessionNotifier.value = session.copyWith(isPaused: false);
+                  },
+                  onCancel: () {
+                    _transferClient.cancel();
+                    _activeSessionNotifier.value = null;
+                    Navigator.of(context).pop();
+                  },
+                  onDone: () {
+                    _transferServer.revokeSession(session.sessionId);
+                    _activeSessionNotifier.value = null;
+                    Navigator.of(context).pop();
+                  },
+                  onSendMore: session.peer.ipAddress.isNotEmpty
+                      ? () => _openFilePickerForSession(
+                            session.peer,
+                            session.sessionId,
+                            session.authPin,
+                          )
+                      : null,
+                );
               },
-              onResume: () {
-                _transferClient.resume();
-                _activeSessionNotifier.value = session.copyWith(isPaused: false);
-              },
-              onCancel: () {
-                _transferClient.cancel();
-                _activeSessionNotifier.value = null;
-                Navigator.of(context).pop();
-              },
-              onDone: () {
-                _activeSessionNotifier.value = null;
-                Navigator.of(context).pop();
-              },
-              onSendMore: session.direction == TransferDirection.outgoing
-                  ? () {
-                      final peer = session.peer;
-                      final pin = session.authPin;
-                      _activeSessionNotifier.value = null;
-                      Navigator.of(context).pop();
-                      _onSelectDevice(peer, authPin: pin);
-                    }
-                  : null,
-            );
-          },
-        ),
-      ),
-    );
+            ),
+          ),
+        )
+        .whenComplete(() {
+      _isQueueScreenOpen = false;
+    });
   }
 
-  void _startTransferSession(
+  void _startTransferBatch(
     DiscoveredDevice peer,
     List<FileManifestItem> files, {
+    required String sessionId,
     String authPin = '',
   }) {
     final session = TransferSession(
-      sessionId: 'sess_${DateTime.now().millisecondsSinceEpoch}',
+      sessionId: sessionId,
       peer: peer,
       direction: TransferDirection.outgoing,
       authPin: authPin,
@@ -411,6 +610,7 @@ class _MainAppShellState extends State<MainAppShell> {
           senderName: _discoveryManager.localDeviceName,
           authPin: authPin,
           filesToSend: files,
+          sessionId: sessionId,
         )
         .catchError((Object e) {
       final current = _activeSessionNotifier.value;
@@ -431,7 +631,33 @@ class _MainAppShellState extends State<MainAppShell> {
       return false;
     });
 
-    _pushTransferQueueScreen();
+    _openSessionWorkspace();
+  }
+
+  Future<QrPairingPayload?> _startOfflineHotspotForQr() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final res = await _channel.invokeMapMethod<String, dynamic>('startLocalOnlyHotspot');
+      if (res == null) return null;
+      final ssid = res['ssid'] as String? ?? '';
+      final passphrase = res['passphrase'] as String? ?? '';
+      final ip = res['ip'] as String? ?? (_discoveryManager.localIp ?? '192.168.43.1');
+      return _discoveryManager.getLocalQrPayload(
+        wifiSsid: ssid,
+        wifiPassword: passphrase,
+      ).let((p) => QrPairingPayload(
+            ip: ip,
+            port: p.port,
+            token: p.token,
+            pin: p.pin,
+            deviceName: p.deviceName,
+            os: p.os,
+            wifiSsid: ssid,
+            wifiPassword: passphrase,
+          ));
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _openQrPairing() async {
@@ -443,10 +669,26 @@ class _MainAppShellState extends State<MainAppShell> {
       backgroundColor: Colors.transparent,
       builder: (_) => QrPairingModal(
         localPayload: _discoveryManager.getLocalQrPayload(),
-        onPeerScanned: (payload) {
+        onStartOfflineHotspot: Platform.isAndroid ? _startOfflineHotspotForQr : null,
+        onPeerScanned: (payload) async {
+          if (payload.wifiSsid != null &&
+              payload.wifiSsid!.isNotEmpty &&
+              payload.wifiPassword != null &&
+              payload.wifiPassword!.isNotEmpty &&
+              Platform.isAndroid) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Joining offline hotspot ${payload.wifiSsid}...')),
+            );
+            try {
+              await _channel.invokeMethod('connectToWifiHotspot', {
+                'ssid': payload.wifiSsid,
+                'passphrase': payload.wifiPassword,
+              });
+            } catch (_) {}
+          }
           final device = payload.toDiscoveredDevice();
           _discoveryManager.registerManualDevice(device);
-          _onSelectDevice(device, authPin: payload.pin);
+          await _onSelectDevice(device, authPin: payload.pin);
         },
       ),
     );
@@ -473,8 +715,14 @@ class _MainAppShellState extends State<MainAppShell> {
           onOpenQrPairing: _openQrPairing,
           onOpenHotspotGuide: _openHotspotGuide,
           onRefresh: _discoveryManager.refreshDiscovery,
+          radioStates: _radioStates,
+          onEnableRadio: _discoveryManager.openRadioSettings,
         );
       },
     );
   }
+}
+
+extension _LetExt<T> on T {
+  R let<R>(R Function(T) block) => block(this);
 }

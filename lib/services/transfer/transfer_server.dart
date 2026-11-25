@@ -24,6 +24,15 @@ typedef ManifestReceivedCallback = Future<bool> Function(
   String authPin,
 );
 
+typedef SessionRequestCallback = Future<bool> Function(
+  String sessionId,
+  String peerName,
+  String peerOs,
+  String peerIp,
+  int peerPort,
+  String authPin,
+);
+
 /// Embedded high-speed streaming server running directly on the receiving mobile device.
 class TransferServer {
   HttpServer? _server;
@@ -36,10 +45,22 @@ class TransferServer {
   final Map<String, FileManifestItem> _activeFiles = {};
   final Map<String, RandomAccessFile> _openFileHandles = {};
   final Map<String, String> _tempFilePaths = {};
+  final Set<String> _trustedSessions = {};
 
   ProgressCallback? onProgress;
   ManifestReceivedCallback? onManifestReceived;
+  SessionRequestCallback? onSessionRequested;
   void Function(String fileId, String finalPath, String sha256)? onFileCompleted;
+
+  void trustSession(String sessionId) {
+    if (sessionId.isNotEmpty) _trustedSessions.add(sessionId);
+  }
+
+  void revokeSession(String sessionId) {
+    _trustedSessions.remove(sessionId);
+  }
+
+  bool isSessionTrusted(String sessionId) => _trustedSessions.contains(sessionId);
 
   int get port => _port;
   bool get isRunning => _server != null;
@@ -93,7 +114,9 @@ class TransferServer {
     final path = request.uri.path;
 
     try {
-      if (path == '/api/v1/transfer/handshake') {
+      if (path == '/api/v1/session/request') {
+        await _handleSessionRequest(request);
+      } else if (path == '/api/v1/transfer/handshake') {
         await _handleHandshake(request);
       } else if (path == '/api/v1/transfer/manifest') {
         await _handleManifest(request);
@@ -117,17 +140,85 @@ class TransferServer {
     }
   }
 
-  /// Validates session token and 4-digit PIN.
+  /// Handles mutual one-time session approval request.
+  Future<void> _handleSessionRequest(HttpRequest request) async {
+    final body = await utf8.decodeStream(request);
+    final data = jsonDecode(body) as Map<String, dynamic>;
+
+    final sessionId = data['sessionId'] as String? ?? '';
+    final peerName = data['peerName'] as String? ?? 'Nearby Peer';
+    final peerOs = data['peerOs'] as String? ?? 'android';
+    final peerIp = (data['peerIp'] as String?)?.isNotEmpty == true
+        ? data['peerIp'] as String
+        : (request.connectionInfo?.remoteAddress.address ?? '');
+    final peerPort = (data['peerPort'] as num?)?.toInt() ?? AppConstants.defaultTransferPort;
+    final clientToken = data['token'] as String? ?? '';
+    final clientPin = data['pin'] as String? ?? '';
+
+    bool authOk = _trustedSessions.contains(sessionId);
+    if (!authOk) {
+      if (_verificationPin.isNotEmpty && clientPin.isNotEmpty) {
+        authOk = (clientPin == _verificationPin);
+      } else if (_sessionToken.isNotEmpty && clientToken.isNotEmpty) {
+        authOk = (clientToken == _sessionToken);
+      } else if (clientPin.isEmpty && clientToken.isEmpty) {
+        // Peer-initiated connection request from Radar / Wi-Fi Direct: rely on mutual user prompt
+        authOk = true;
+      }
+    }
+
+    if (!authOk) {
+      request.response.statusCode = HttpStatus.unauthorized;
+      request.response.write(jsonEncode({'error': 'Invalid PIN or session token'}));
+      await request.response.close();
+      return;
+    }
+
+    if (!_trustedSessions.contains(sessionId) && onSessionRequested != null) {
+      final accepted = await onSessionRequested!(
+        sessionId,
+        peerName,
+        peerOs,
+        peerIp,
+        peerPort,
+        clientPin,
+      );
+      if (!accepted) {
+        request.response.statusCode = HttpStatus.forbidden;
+        request.response.write(jsonEncode({'error': 'Connection request declined'}));
+        await request.response.close();
+        return;
+      }
+    }
+
+    if (sessionId.isNotEmpty) {
+      _trustedSessions.add(sessionId);
+    }
+
+    request.response.statusCode = HttpStatus.ok;
+    request.response.headers.contentType = ContentType.json;
+    request.response.write(jsonEncode({
+      'status': 'trusted',
+      'sessionId': sessionId,
+      'token': _sessionToken,
+    }));
+    await request.response.close();
+  }
+
+  /// Validates session token, 4-digit PIN, or trusted sessionId.
   Future<void> _handleHandshake(HttpRequest request) async {
     final body = await utf8.decodeStream(request);
     final data = jsonDecode(body);
 
     final clientToken = data['token'] as String? ?? '';
     final clientPin = data['pin'] as String? ?? '';
+    final sessionId = data['sessionId'] as String? ?? '';
 
-    // Strictly verify PIN or session token
+    // Strictly verify trusted session, PIN, or session token
     bool isValid = false;
-    if (_verificationPin.isNotEmpty && clientPin.isNotEmpty) {
+    if (sessionId.isNotEmpty && _trustedSessions.contains(sessionId)) {
+      isValid = true;
+    } else if (_verificationPin.isNotEmpty && clientPin.isNotEmpty) {
       isValid = (clientPin == _verificationPin);
     } else if (_sessionToken.isNotEmpty && clientToken.isNotEmpty) {
       isValid = (clientToken == _sessionToken);
@@ -159,14 +250,16 @@ class TransferServer {
 
     final senderName = data['senderName'] as String? ?? 'Peer';
     final pin = data['pin'] as String? ?? '';
+    final sessionId = data['sessionId'] as String? ?? '';
     final rawFiles = data['files'] as List<dynamic>? ?? [];
 
     final manifestItems = rawFiles.map((f) => FileManifestItem.fromJson(f)).toList();
 
-    // Trigger receiver acceptance callback (skip prompt when resuming an already-accepted file)
+    // Trigger receiver acceptance callback ONLY if not already trusted in this session and not resuming
+    final isTrusted = sessionId.isNotEmpty && _trustedSessions.contains(sessionId);
     final isResume = manifestItems.isNotEmpty &&
         manifestItems.every((m) => _activeFiles.containsKey(m.fileId));
-    if (onManifestReceived != null && !isResume) {
+    if (onManifestReceived != null && !isTrusted && !isResume) {
       final accepted = await onManifestReceived!(senderName, manifestItems, pin);
       if (!accepted) {
         request.response.statusCode = HttpStatus.forbidden;
@@ -389,7 +482,7 @@ class TransferServer {
       mimeType: item.mimeType,
     );
 
-    // Step 4: Clean up checkpoint
+    // Step 4: Clean up checkpoint & per-file active state so back-to-back sends stay clean
     await _resumeManager?.deleteCheckpoint(fileId);
 
     _activeFiles[fileId] = item.copyWith(
@@ -404,6 +497,8 @@ class TransferServer {
     // Release wake lock if all files in the batch are finished
     if (_activeFiles.values.every((f) => f.status == TransferStatus.completed)) {
       await WakeLockManager.releaseWakeLock();
+      _activeFiles.clear();
+      _tempFilePaths.clear();
     }
 
     request.response.statusCode = HttpStatus.ok;

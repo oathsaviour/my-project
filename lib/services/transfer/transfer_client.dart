@@ -6,7 +6,6 @@ import 'package:crypto/crypto.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/models/discovered_device.dart';
 import '../../core/models/file_manifest.dart';
-import '../../core/utils/checksum_stream.dart';
 import '../../core/utils/speed_calculator.dart';
 import 'wake_lock_manager.dart';
 
@@ -51,12 +50,50 @@ class TransferClient {
     WakeLockManager.forceReleaseAll();
   }
 
+  /// Requests a mutual one-time trusted session with a peer device.
+  /// Returns the peer's session token if approved, or null if declined/failed.
+  Future<String?> requestMutualSession({
+    required DiscoveredDevice targetDevice,
+    required String sessionId,
+    required String localName,
+    required DeviceOS localOs,
+    required String localIp,
+    required int localPort,
+    required String authPin,
+  }) async {
+    try {
+      final baseUrl = 'http://${targetDevice.ipAddress}:${targetDevice.port}';
+      final uri = Uri.parse('$baseUrl/api/v1/session/request');
+      final request = await _httpClient.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({
+        'sessionId': sessionId,
+        'peerName': localName,
+        'peerOs': localOs.name,
+        'peerIp': localIp,
+        'peerPort': localPort,
+        'token': targetDevice.sessionToken,
+        'pin': authPin,
+      }));
+      final response = await request.close();
+      final body = await utf8.decodeStream(response);
+      if (response.statusCode == HttpStatus.ok) {
+        final data = jsonDecode(body) as Map<String, dynamic>;
+        return data['token'] as String? ?? '';
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Executes end-to-end file transfer session to target peer device.
   Future<bool> sendFiles({
     required DiscoveredDevice targetDevice,
     required String senderName,
     required String authPin,
     required List<FileManifestItem> filesToSend,
+    String? sessionId,
   }) async {
     _isPaused = false;
     _isCanceled = false;
@@ -70,7 +107,12 @@ class TransferClient {
       final baseUrl = 'http://${targetDevice.ipAddress}:${targetDevice.port}';
 
       // Step 1: Handshake
-      final handshakeOk = await _performHandshake(baseUrl, targetDevice.sessionToken, authPin);
+      final handshakeOk = await _performHandshake(
+        baseUrl,
+        targetDevice.sessionToken,
+        authPin,
+        sessionId: sessionId,
+      );
       if (!handshakeOk) {
         const msg = 'Handshake rejected: invalid PIN or authentication token';
         if (filesToSend.isNotEmpty) {
@@ -82,7 +124,13 @@ class TransferClient {
       if (_isCanceled) return false;
 
       // Step 2: Send Manifest & Check Resume Offsets (no pre-read hashing delay for 5GB+ files)
-      final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, filesToSend);
+      final resumeOffsets = await _sendManifest(
+        baseUrl,
+        senderName,
+        authPin,
+        filesToSend,
+        sessionId: sessionId,
+      );
 
       // Step 3: Stream files chunk by chunk (with streaming SHA-256 + auto-reconnect on drop)
       for (final fileItem in filesToSend) {
@@ -94,6 +142,7 @@ class TransferClient {
           senderName: senderName,
           authPin: authPin,
           token: targetDevice.sessionToken,
+          sessionId: sessionId,
           item: fileItem,
           resumeOffsetBytes: startOffset,
         );
@@ -111,7 +160,12 @@ class TransferClient {
     }
   }
 
-  Future<bool> _performHandshake(String baseUrl, String token, String pin) async {
+  Future<bool> _performHandshake(
+    String baseUrl,
+    String token,
+    String pin, {
+    String? sessionId,
+  }) async {
     try {
       final uri = Uri.parse('$baseUrl/api/v1/transfer/handshake');
       final request = await _httpClient.postUrl(uri);
@@ -120,6 +174,7 @@ class TransferClient {
       request.write(jsonEncode({
         'token': token,
         'pin': pin,
+        if (sessionId != null && sessionId.isNotEmpty) 'sessionId': sessionId,
       }));
 
       final response = await request.close();
@@ -134,8 +189,9 @@ class TransferClient {
     String baseUrl,
     String senderName,
     String pin,
-    List<FileManifestItem> files,
-  ) async {
+    List<FileManifestItem> files, {
+    String? sessionId,
+  }) async {
     final uri = Uri.parse('$baseUrl/api/v1/transfer/manifest');
     final request = await _httpClient.postUrl(uri);
     request.headers.contentType = ContentType.json;
@@ -143,6 +199,7 @@ class TransferClient {
     request.write(jsonEncode({
       'senderName': senderName,
       'pin': pin,
+      if (sessionId != null && sessionId.isNotEmpty) 'sessionId': sessionId,
       'files': files.map((f) => f.toJson()).toList(),
     }));
 
@@ -170,6 +227,7 @@ class TransferClient {
     required String senderName,
     required String authPin,
     required String token,
+    String? sessionId,
     required FileManifestItem item,
     required int resumeOffsetBytes,
   }) async {
@@ -243,8 +301,6 @@ class TransferClient {
           uploaded = false;
         } on TimeoutException {
           uploaded = false;
-        } on HttpException {
-          uploaded = false;
         }
 
         if (!uploaded) {
@@ -254,6 +310,7 @@ class TransferClient {
             senderName: senderName,
             authPin: authPin,
             token: token,
+            sessionId: sessionId,
             item: item,
             currentOffset: currentOffset,
             totalSize: totalSize,
@@ -352,6 +409,7 @@ class TransferClient {
     required String senderName,
     required String authPin,
     required String token,
+    String? sessionId,
     required FileManifestItem item,
     required int currentOffset,
     required int totalSize,
@@ -382,9 +440,9 @@ class TransferClient {
         }
 
         if (statusRes.statusCode == HttpStatus.notFound) {
-          final ok = await _performHandshake(baseUrl, token, authPin);
+          final ok = await _performHandshake(baseUrl, token, authPin, sessionId: sessionId);
           if (ok) {
-            final offsets = await _sendManifest(baseUrl, senderName, authPin, [item]);
+            final offsets = await _sendManifest(baseUrl, senderName, authPin, [item], sessionId: sessionId);
             return offsets[item.fileId] ?? 0;
           }
         }

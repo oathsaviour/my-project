@@ -5,7 +5,37 @@ import 'dart:typed_data';
 import '../../core/models/discovered_device.dart';
 import '../../core/security/qr_payload.dart';
 import '../../core/security/pin_generator.dart';
+import '../transfer/wake_lock_manager.dart';
 import 'mdns_discovery.dart';
+
+class RadioStates {
+  final bool wifiEnabled;
+  final bool bluetoothEnabled;
+  final bool locationEnabled;
+
+  const RadioStates({
+    required this.wifiEnabled,
+    required this.bluetoothEnabled,
+    required this.locationEnabled,
+  });
+
+  bool get allEnabled => wifiEnabled && bluetoothEnabled && locationEnabled;
+
+  factory RadioStates.fromMap(Map<dynamic, dynamic>? map) {
+    if (map == null) {
+      return const RadioStates(
+        wifiEnabled: true,
+        bluetoothEnabled: true,
+        locationEnabled: true,
+      );
+    }
+    return RadioStates(
+      wifiEnabled: map['wifi'] == true,
+      bluetoothEnabled: map['bluetooth'] == true,
+      locationEnabled: map['location'] == true,
+    );
+  }
+}
 
 abstract class IDiscoveryService {
   Stream<List<DiscoveredDevice>> get discoveredDevicesStream;
@@ -24,8 +54,13 @@ abstract class IDiscoveryService {
 class DiscoveryManager implements IDiscoveryService {
   static const int discoveryUdpPort = 52841;
 
+  /// Optional native channel invoker (configured in main.dart for Android/iOS).
+  static NativeChannelInvoker? nativeChannelInvoker;
+
   final _devicesController = StreamController<List<DiscoveredDevice>>.broadcast();
+  final _radioStatesController = StreamController<RadioStates>.broadcast();
   final Map<String, DiscoveredDevice> _devices = {};
+  final Set<String> _localIps = {};
 
   RawDatagramSocket? _udpSocket;
   MdnsDiscoveryEngine? _mdnsEngine;
@@ -44,6 +79,8 @@ class DiscoveryManager implements IDiscoveryService {
   @override
   Stream<List<DiscoveredDevice>> get discoveredDevicesStream => _devicesController.stream;
 
+  Stream<RadioStates> get radioStatesStream => _radioStatesController.stream;
+
   @override
   List<DiscoveredDevice> get currentDevices => _devices.values.toList();
 
@@ -55,7 +92,47 @@ class DiscoveryManager implements IDiscoveryService {
   DeviceOS get localOs => _localOs;
   bool get isDiscovering => _isDiscovering;
 
+  Future<RadioStates> checkRadioStates() async {
+    if (!Platform.isAndroid || nativeChannelInvoker == null) {
+      const states = RadioStates(
+        wifiEnabled: true,
+        bluetoothEnabled: true,
+        locationEnabled: true,
+      );
+      if (!_radioStatesController.isClosed) _radioStatesController.add(states);
+      return states;
+    }
+
+    try {
+      final raw = await nativeChannelInvoker!<Map<dynamic, dynamic>>('checkRadioStates');
+      final states = RadioStates.fromMap(raw);
+      if (!_radioStatesController.isClosed) _radioStatesController.add(states);
+      return states;
+    } catch (_) {
+      const states = RadioStates(
+        wifiEnabled: true,
+        bluetoothEnabled: true,
+        locationEnabled: true,
+      );
+      return states;
+    }
+  }
+
+  Future<void> openRadioSettings(String radio) async {
+    if (Platform.isAndroid && nativeChannelInvoker != null) {
+      try {
+        await nativeChannelInvoker!('openRadioSettings', {'radio': radio});
+      } catch (_) {}
+    }
+  }
+
+  /// Resolves all active non-loopback IPv4 interfaces (wlan0, ap0, swlan0, etc.)
+  /// and selects the primary LAN/Hotspot IP.
   Future<String?> resolveLocalIp() async {
+    _localIps.clear();
+    String? preferredIp;
+    String? hotspotIp;
+
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
@@ -65,46 +142,37 @@ class DiscoveryManager implements IDiscoveryService {
       for (final interface in interfaces) {
         final name = interface.name.toLowerCase();
         for (final addr in interface.addresses) {
-          if (!addr.isLoopback &&
-              (name.contains('wlan') ||
-                  name.contains('wi-fi') ||
-                  name.contains('wifi') ||
-                  name.contains('swlan') ||
-                  name.contains('ap') ||
-                  name.contains('bridge') ||
-                  name.contains('en0') ||
-                  name.contains('eth'))) {
-            _localIp = addr.address;
-            return _localIp;
+          if (addr.isLoopback) continue;
+          _localIps.add(addr.address);
+
+          if (name.contains('ap') || name.contains('swlan') || addr.address.startsWith('192.168.43.') || addr.address.startsWith('192.168.49.')) {
+            hotspotIp ??= addr.address;
+          } else if (name.contains('wlan') ||
+              name.contains('wi-fi') ||
+              name.contains('wifi') ||
+              name.contains('bridge') ||
+              name.contains('en0') ||
+              name.contains('eth')) {
+            preferredIp ??= addr.address;
           }
         }
       }
 
-      // Prefer private RFC1918 LAN addresses over virtual/tunnel interfaces
-      for (final interface in interfaces) {
-        for (final addr in interface.addresses) {
-          if (!addr.isLoopback && _isPrivateLanIp(addr.address)) {
-            _localIp = addr.address;
-            return _localIp;
-          }
-        }
-      }
-
-      for (final interface in interfaces) {
-        for (final addr in interface.addresses) {
-          if (!addr.isLoopback) {
-            _localIp = addr.address;
-            return _localIp;
+      if (preferredIp == null && hotspotIp == null) {
+        for (final ip in _localIps) {
+          if (_isPrivateLanIp(ip)) {
+            preferredIp = ip;
+            break;
           }
         }
       }
     } catch (_) {}
 
-    _localIp = '127.0.0.1';
+    _localIp = preferredIp ?? hotspotIp ?? (_localIps.isNotEmpty ? _localIps.first : '127.0.0.1');
     return _localIp;
   }
 
-  QrPairingPayload getLocalQrPayload() {
+  QrPairingPayload getLocalQrPayload({String? wifiSsid, String? wifiPassword}) {
     return QrPairingPayload(
       ip: _localIp ?? '127.0.0.1',
       port: _transferPort,
@@ -112,6 +180,8 @@ class DiscoveryManager implements IDiscoveryService {
       pin: _verificationPin,
       deviceName: _localDeviceName,
       os: _localOs,
+      wifiSsid: wifiSsid,
+      wifiPassword: wifiPassword,
     );
   }
 
@@ -130,9 +200,112 @@ class DiscoveryManager implements IDiscoveryService {
     _isDiscovering = true;
 
     await resolveLocalIp();
+    await checkRadioStates();
     await _startUdpBeacon();
     await _startMdnsDiscovery();
+    await _startNativeDiscovery();
     _notifyDevices();
+  }
+
+  Future<void> _startNativeDiscovery() async {
+    if (!Platform.isAndroid || nativeChannelInvoker == null) return;
+    try {
+      await nativeChannelInvoker!('acquireMulticastLock');
+    } catch (_) {}
+    try {
+      await nativeChannelInvoker!('startNsdDiscovery', {
+        'deviceName': _localDeviceName,
+        'port': _transferPort,
+      });
+    } catch (_) {}
+    try {
+      await nativeChannelInvoker!('startP2pDiscovery', {
+        'deviceName': _localDeviceName,
+      });
+    } catch (_) {}
+  }
+
+  /// Called by native Android MethodChannel handler when NSD/mDNS resolves a peer.
+  void handleNativeNsdPeer(Map<dynamic, dynamic> data) {
+    final ip = data['ip'] as String? ?? '';
+    final name = data['name'] as String? ?? 'Nearby Device';
+    final port = (data['port'] as num?)?.toInt() ?? 52840;
+    if (ip.isEmpty || _localIps.contains(ip)) return;
+
+    addOrUpdateDevice(
+      DiscoveredDevice(
+        id: 'nsd_$ip:$port',
+        name: name,
+        os: DeviceOS.android,
+        ipAddress: ip,
+        port: port,
+        sessionToken: '',
+        lastSeen: DateTime.now(),
+        transport: ip.startsWith('192.168.43.') || ip.startsWith('192.168.49.') || ip.startsWith('172.20.10.')
+            ? DiscoveryTransport.hotspot
+            : DiscoveryTransport.localWifi,
+      ),
+    );
+  }
+
+  /// Called by native Android MethodChannel handler when Wi-Fi Direct discovers a peer.
+  void handleNativeP2pPeer(Map<dynamic, dynamic> data) {
+    final address = data['address'] as String? ?? '';
+    final name = data['name'] as String? ?? 'Wi-Fi Direct Peer';
+    if (address.isEmpty) return;
+
+    addOrUpdateDevice(
+      DiscoveredDevice(
+        id: 'p2p_$address',
+        name: name,
+        os: DeviceOS.android,
+        ipAddress: '',
+        port: _transferPort,
+        sessionToken: '',
+        lastSeen: DateTime.now(),
+        transport: DiscoveryTransport.nearbyP2p,
+        p2pAddress: address,
+      ),
+    );
+  }
+
+  /// Called by native Android MethodChannel handler when BLE discovers a nearby peer.
+  void handleNativeBlePeer(Map<dynamic, dynamic> data) {
+    final address = data['address'] as String? ?? '';
+    final name = data['name'] as String? ?? 'Nearby BLE Peer';
+    final rssi = (data['rssi'] as num?)?.toInt();
+    if (address.isEmpty) return;
+
+    // Only add BLE badge if no LAN/Wi-Fi Direct peer already represents it
+    final bleId = 'ble_$address';
+    addOrUpdateDevice(
+      DiscoveredDevice(
+        id: bleId,
+        name: name,
+        os: DeviceOS.android,
+        ipAddress: '',
+        port: _transferPort,
+        sessionToken: '',
+        lastSeen: DateTime.now(),
+        rssi: rssi,
+        transport: DiscoveryTransport.nearbyP2p,
+        p2pAddress: address,
+      ),
+    );
+  }
+
+  /// Connects to a Wi-Fi Direct peer and returns the resolved group owner IP.
+  Future<String?> connectP2pPeer(String deviceAddress) async {
+    if (!Platform.isAndroid || nativeChannelInvoker == null) return null;
+    try {
+      final res = await nativeChannelInvoker!<Map<dynamic, dynamic>>(
+        'connectP2pPeer',
+        {'deviceAddress': deviceAddress},
+      );
+      return res?['groupOwnerIp'] as String?;
+    } catch (_) {
+      return null;
+    }
   }
 
   bool _isPrivateLanIp(String ip) {
@@ -145,7 +318,7 @@ class DiscoveryManager implements IDiscoveryService {
     _mdnsEngine?.stop();
     _mdnsEngine = MdnsDiscoveryEngine(
       onDeviceDiscovered: (device) {
-        if (device.ipAddress != _localIp) {
+        if (!_localIps.contains(device.ipAddress)) {
           addOrUpdateDevice(device);
         }
       },
@@ -171,14 +344,12 @@ class DiscoveryManager implements IDiscoveryService {
         );
       } catch (_) {
         try {
-          // Windows and some Android versions do not support SO_REUSEPORT
           _udpSocket = await RawDatagramSocket.bind(
             InternetAddress.anyIPv4,
             discoveryUdpPort,
             reuseAddress: true,
           );
         } catch (_) {
-          // Fallback to ephemeral port so outbound hotspot unicast pings still work
           _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
         }
       }
@@ -192,22 +363,22 @@ class DiscoveryManager implements IDiscoveryService {
         }
       });
 
-      // Broadcast our presence every 2 seconds
       _beaconTimer?.cancel();
       _beaconTimer = Timer.periodic(const Duration(seconds: 2), (_) => _sendBeacon());
       _sendBeacon();
 
-      // Remove offline peers after 10 seconds
       _pruneTimer?.cancel();
       _pruneTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        pruneStaleDevices(timeout: const Duration(seconds: 10));
+        pruneStaleDevices(timeout: const Duration(seconds: 12));
       });
     } catch (_) {}
   }
 
   Future<void> refreshDiscovery() async {
     await resolveLocalIp();
+    await checkRadioStates();
     _sendBeacon();
+    await _startNativeDiscovery();
   }
 
   Uint8List _buildBeaconBytes({bool isReply = false}) {
@@ -232,19 +403,21 @@ class DiscoveryManager implements IDiscoveryService {
 
     final bytes = _buildBeaconBytes();
 
-    // 1. Global broadcast & subnet broadcast (Shared Wi-Fi Router)
+    // 1. Global broadcast
     try {
       _udpSocket!.send(bytes, InternetAddress('255.255.255.255'), discoveryUdpPort);
     } catch (_) {}
 
+    // 2. Broadcast & gateway unicast across ALL active interfaces (wlan0, ap0, swlan0, etc.)
     final unicastTargets = <String>{
       '192.168.43.1', // Android Hotspot host
-      '192.168.49.1', // Wi-Fi Direct / Android P2P host
+      '192.168.49.1', // Wi-Fi Direct / P2P host
       '172.20.10.1', // iPhone Personal Hotspot host
     };
 
-    if (_localIp != null && _localIp!.contains('.')) {
-      final parts = _localIp!.split('.');
+    for (final ip in _localIps) {
+      if (!ip.contains('.')) continue;
+      final parts = ip.split('.');
       if (parts.length == 4) {
         final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
         final subnetGateway = '${parts[0]}.${parts[1]}.${parts[2]}.1';
@@ -255,9 +428,8 @@ class DiscoveryManager implements IDiscoveryService {
       }
     }
 
-    // 2. Unicast pings to Hotspot gateways (bypasses AP broadcast filtering)
     for (final targetIp in unicastTargets) {
-      if (targetIp == _localIp) continue;
+      if (_localIps.contains(targetIp)) continue;
       try {
         _udpSocket!.send(bytes, InternetAddress(targetIp), discoveryUdpPort);
       } catch (_) {}
@@ -274,10 +446,13 @@ class DiscoveryManager implements IDiscoveryService {
       if (senderId.isEmpty || senderId == _localDeviceId) return;
 
       final senderIp = datagram.address.address;
-      if (senderIp == _localIp) return;
+      if (_localIps.contains(senderIp)) return;
 
       final osStr = (data['os'] as String? ?? 'android').toLowerCase();
       final os = osStr == 'ios' ? DeviceOS.ios : DeviceOS.android;
+      final isHotspot = senderIp.startsWith('192.168.43.') ||
+          senderIp.startsWith('192.168.49.') ||
+          senderIp.startsWith('172.20.10.');
 
       final device = DiscoveredDevice(
         id: senderId,
@@ -289,11 +464,11 @@ class DiscoveryManager implements IDiscoveryService {
         version: data['version'] as String? ?? '1.0.0',
         lastSeen: DateTime.now(),
         rssi: -45,
+        transport: isHotspot ? DiscoveryTransport.hotspot : DiscoveryTransport.localWifi,
       );
 
       addOrUpdateDevice(device);
 
-      // Immediately reply unicast to the sender so Hotspot hosts/clients pair in <1s
       if (data['reply'] != true && _udpSocket != null) {
         try {
           _udpSocket!.send(
@@ -315,12 +490,20 @@ class DiscoveryManager implements IDiscoveryService {
     _mdnsEngine = null;
     _udpSocket?.close();
     _udpSocket = null;
+
+    if (Platform.isAndroid && nativeChannelInvoker != null) {
+      try {
+        await nativeChannelInvoker!('stopNsdDiscovery');
+        await nativeChannelInvoker!('stopP2pDiscovery');
+      } catch (_) {}
+    }
+
     _devices.clear();
     _notifyDevices();
   }
 
   void addOrUpdateDevice(DiscoveredDevice device) {
-    if (device.ipAddress == _localIp && device.port == _transferPort) return;
+    if (_localIps.contains(device.ipAddress) && device.port == _transferPort) return;
     _devices[device.id] = device;
     _notifyDevices();
   }
@@ -330,7 +513,7 @@ class DiscoveryManager implements IDiscoveryService {
     addOrUpdateDevice(device);
   }
 
-  void pruneStaleDevices({Duration timeout = const Duration(seconds: 10)}) {
+  void pruneStaleDevices({Duration timeout = const Duration(seconds: 12)}) {
     final cutoff = DateTime.now().subtract(timeout);
     final before = _devices.length;
     _devices.removeWhere((_, dev) => dev.lastSeen.isBefore(cutoff));
@@ -346,9 +529,8 @@ class DiscoveryManager implements IDiscoveryService {
   }
 
   void dispose() {
-    _beaconTimer?.cancel();
-    _pruneTimer?.cancel();
-    _udpSocket?.close();
+    stopDiscovery();
     _devicesController.close();
+    _radioStatesController.close();
   }
 }

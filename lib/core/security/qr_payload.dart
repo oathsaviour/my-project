@@ -1,4 +1,3 @@
-import 'dart:convert';
 import '../constants/app_constants.dart';
 import '../models/discovered_device.dart';
 
@@ -11,6 +10,8 @@ class QrPairingPayload {
   final String deviceName;
   final DeviceOS os;
   final String version;
+  final String? wifiSsid;
+  final String? wifiPassword;
 
   const QrPairingPayload({
     required this.ip,
@@ -20,6 +21,8 @@ class QrPairingPayload {
     required this.deviceName,
     required this.os,
     this.version = '1.0.0',
+    this.wifiSsid,
+    this.wifiPassword,
   });
 
   /// Serializes into a standard URI string for QR code generation.
@@ -35,6 +38,8 @@ class QrPairingPayload {
         'name': deviceName,
         'os': os.name,
         'v': version,
+        if (wifiSsid != null && wifiSsid!.isNotEmpty) 'ssid': wifiSsid!,
+        if (wifiPassword != null && wifiPassword!.isNotEmpty) 'pass': wifiPassword!,
       },
     );
     return uri.toString();
@@ -56,6 +61,8 @@ class QrPairingPayload {
       final name = params['name'] ?? 'Discovered Peer';
       final os = DeviceOS.fromString(params['os']);
       final version = params['v'] ?? '1.0.0';
+      final wifiSsid = params['ssid'];
+      final wifiPassword = params['pass'];
 
       if (ip.isEmpty) return null;
 
@@ -67,6 +74,8 @@ class QrPairingPayload {
         deviceName: name,
         os: os,
         version: version,
+        wifiSsid: wifiSsid,
+        wifiPassword: wifiPassword,
       );
     } catch (_) {
       return null;
@@ -84,6 +93,9 @@ class QrPairingPayload {
       sessionToken: token,
       version: version,
       lastSeen: DateTime.now(),
+      transport: (wifiSsid != null && wifiSsid!.isNotEmpty)
+          ? DiscoveryTransport.nearbyP2p
+          : DiscoveryTransport.manual,
     );
   }
 }

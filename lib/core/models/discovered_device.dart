@@ -1,4 +1,23 @@
-import 'dart:convert';
+/// Discovery transport mechanism used to locate a peer.
+enum DiscoveryTransport {
+  localWifi,
+  hotspot,
+  nearbyP2p,
+  manual;
+
+  String get badgeLabel {
+    switch (this) {
+      case DiscoveryTransport.localWifi:
+        return 'Local Wi-Fi';
+      case DiscoveryTransport.hotspot:
+        return 'Hotspot';
+      case DiscoveryTransport.nearbyP2p:
+        return 'Nearby P2P';
+      case DiscoveryTransport.manual:
+        return 'Direct';
+    }
+  }
+}
 
 /// Supported mobile operating systems for universal pairing.
 enum DeviceOS {
@@ -40,6 +59,8 @@ class DiscoveredDevice {
   final String version;
   final DateTime lastSeen;
   final int? rssi; // Signal strength if discovered via BLE
+  final DiscoveryTransport transport;
+  final String? p2pAddress; // MAC/device address for Wi-Fi Direct / Nearby P2P
 
   const DiscoveredDevice({
     required this.id,
@@ -51,6 +72,8 @@ class DiscoveredDevice {
     this.version = '1.0.0',
     required this.lastSeen,
     this.rssi,
+    this.transport = DiscoveryTransport.localWifi,
+    this.p2pAddress,
   });
 
   /// Factory from mDNS TXT record attributes and socket address.
@@ -82,6 +105,8 @@ class DiscoveredDevice {
         'version': version,
         'lastSeen': lastSeen.toIso8601String(),
         'rssi': rssi,
+        'transport': transport.name,
+        if (p2pAddress != null) 'p2pAddress': p2pAddress,
       };
 
   factory DiscoveredDevice.fromJson(Map<String, dynamic> json) => DiscoveredDevice(
@@ -94,6 +119,11 @@ class DiscoveredDevice {
         version: json['version'] as String? ?? '1.0.0',
         lastSeen: DateTime.tryParse(json['lastSeen'] as String? ?? '') ?? DateTime.now(),
         rssi: json['rssi'] as int?,
+        transport: DiscoveryTransport.values.firstWhere(
+          (t) => t.name == json['transport'],
+          orElse: () => DiscoveryTransport.localWifi,
+        ),
+        p2pAddress: json['p2pAddress'] as String?,
       );
 
   DiscoveredDevice copyWith({
@@ -106,6 +136,8 @@ class DiscoveredDevice {
     String? version,
     DateTime? lastSeen,
     int? rssi,
+    DiscoveryTransport? transport,
+    String? p2pAddress,
   }) {
     return DiscoveredDevice(
       id: id ?? this.id,
@@ -117,6 +149,8 @@ class DiscoveredDevice {
       version: version ?? this.version,
       lastSeen: lastSeen ?? this.lastSeen,
       rssi: rssi ?? this.rssi,
+      transport: transport ?? this.transport,
+      p2pAddress: p2pAddress ?? this.p2pAddress,
     );
   }
 

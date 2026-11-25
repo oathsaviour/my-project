@@ -1,6 +1,7 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../core/models/discovered_device.dart';
+import '../../services/discovery/discovery_service.dart';
 import '../theme/app_theme.dart';
 
 /// Screen displaying animated radar sweep and discovered Android/iOS devices.
@@ -11,6 +12,8 @@ class RadarScreen extends StatefulWidget {
   final VoidCallback onOpenQrPairing;
   final VoidCallback onOpenHotspotGuide;
   final VoidCallback? onRefresh;
+  final RadioStates? radioStates;
+  final ValueChanged<String>? onEnableRadio;
 
   const RadarScreen({
     super.key,
@@ -20,6 +23,8 @@ class RadarScreen extends StatefulWidget {
     required this.onOpenQrPairing,
     required this.onOpenHotspotGuide,
     this.onRefresh,
+    this.radioStates,
+    this.onEnableRadio,
   });
 
   @override
@@ -165,13 +170,51 @@ class _RadarScreenState extends State<RadarScreen> with SingleTickerProviderStat
                           ),
                           const SizedBox(width: 6),
                           const Text(
-                            'mDNS / Bonjour Active',
+                            'P2P + mDNS Active',
                             style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                           ),
                         ],
                       ),
                     ],
                   ),
+                  if (widget.radioStates != null && !widget.radioStates!.allEnabled) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: AppTheme.warningAmber.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppTheme.warningAmber.withOpacity(0.4)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.warning_amber_rounded, color: AppTheme.warningAmber, size: 18),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Enable radios for offline P2P:',
+                              style: TextStyle(color: AppTheme.textPrimary, fontSize: 12),
+                            ),
+                          ),
+                          if (!widget.radioStates!.wifiEnabled)
+                            TextButton(
+                              onPressed: () => widget.onEnableRadio?.call('wifi'),
+                              child: const Text('Wi-Fi'),
+                            ),
+                          if (!widget.radioStates!.bluetoothEnabled)
+                            TextButton(
+                              onPressed: () => widget.onEnableRadio?.call('bluetooth'),
+                              child: const Text('BT'),
+                            ),
+                          if (!widget.radioStates!.locationEnabled)
+                            TextButton(
+                              onPressed: () => widget.onEnableRadio?.call('location'),
+                              child: const Text('Location'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Expanded(
                     child: widget.discoveredDevices.isEmpty
@@ -304,31 +347,45 @@ class _DeviceListTile extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text(
-                      device.name,
-                      style: const TextStyle(
-                        color: AppTheme.textPrimary,
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
+                    Flexible(
+                      child: Text(
+                        device.name,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppTheme.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 6),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: badgeColor.withOpacity(0.2),
+                        color: (device.transport == DiscoveryTransport.nearbyP2p
+                                ? AppTheme.accentNeon
+                                : badgeColor)
+                            .withOpacity(0.2),
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
-                        device.os.label,
-                        style: TextStyle(color: badgeColor, fontSize: 10, fontWeight: FontWeight.bold),
+                        device.transport.badgeLabel,
+                        style: TextStyle(
+                          color: device.transport == DiscoveryTransport.nearbyP2p
+                              ? AppTheme.accentNeon
+                              : badgeColor,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '${device.ipAddress}:${device.port}',
+                  device.ipAddress.isNotEmpty
+                      ? '${device.ipAddress}:${device.port}'
+                      : 'Wi-Fi Direct / BLE (${device.p2pAddress ?? 'Tap to pair'})',
                   style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                 ),
               ],
