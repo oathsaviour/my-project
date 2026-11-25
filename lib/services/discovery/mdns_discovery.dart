@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import '../../core/constants/app_constants.dart';
 import '../../core/models/discovered_device.dart';
 
@@ -23,12 +22,21 @@ class MdnsDiscoveryEngine {
     required String sessionToken,
   }) async {
     try {
-      _socket = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4,
-        AppConstants.mdnsPort,
-        reuseAddress: true,
-        reusePort: true,
-      );
+      try {
+        _socket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          AppConstants.mdnsPort,
+          reuseAddress: true,
+          reusePort: true,
+        );
+      } catch (_) {
+        // Windows and some Android kernels reject reusePort: true
+        _socket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          AppConstants.mdnsPort,
+          reuseAddress: true,
+        );
+      }
 
       final multicastGroup = InternetAddress(AppConstants.mdnsMulticastIpv4);
       _socket?.joinMulticast(multicastGroup);

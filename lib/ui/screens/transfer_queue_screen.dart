@@ -141,56 +141,60 @@ class TransferQueueScreen extends StatelessWidget {
             const SizedBox(height: 16),
 
             // Control Buttons
-            if (!session.isCompleted)
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.darkCard,
-                        foregroundColor: AppTheme.textPrimary,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: const BorderSide(color: Color(0xFF30363D)),
+            if (!session.isCompleted &&
+                !session.files.every((f) => f.isCompleted || f.status == TransferStatus.failed))
+              if (session.direction == TransferDirection.outgoing)
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.darkCard,
+                          foregroundColor: AppTheme.textPrimary,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: const BorderSide(color: Color(0xFF30363D)),
+                          ),
                         ),
+                        icon: Icon(session.isPaused ? Icons.play_arrow : Icons.pause),
+                        label: Text(session.isPaused ? 'Resume' : 'Pause'),
+                        onPressed: session.isPaused ? onResume : onPause,
                       ),
-                      icon: Icon(session.isPaused ? Icons.play_arrow : Icons.pause),
-                      label: Text(session.isPaused ? 'Resume' : 'Pause'),
-                      onPressed: session.isPaused ? onResume : onPause,
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF3A1D1D),
-                        foregroundColor: const Color(0xFFFF5252),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: const BorderSide(color: Color(0xFF5A2A2A)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF3A1D1D),
+                          foregroundColor: const Color(0xFFFF5252),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: const BorderSide(color: Color(0xFF5A2A2A)),
+                          ),
                         ),
+                        icon: const Icon(Icons.cancel),
+                        label: const Text('Cancel'),
+                        onPressed: onCancel,
                       ),
-                      icon: const Icon(Icons.cancel),
-                      label: const Text('Cancel'),
-                      onPressed: onCancel,
                     ),
-                  ),
-                ],
-              )
+                  ],
+                )
+              else
+                const SizedBox.shrink()
             else
               ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.accentGreen,
-                  foregroundColor: AppTheme.darkBackground,
+                  backgroundColor: session.isCompleted ? AppTheme.accentGreen : Colors.redAccent,
+                  foregroundColor: session.isCompleted ? AppTheme.darkBackground : Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                icon: const Icon(Icons.check_circle, size: 22),
-                label: const Text(
-                  'Transfer Complete — Done',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                icon: Icon(session.isCompleted ? Icons.check_circle : Icons.error_outline, size: 22),
+                label: Text(
+                  session.isCompleted ? 'Transfer Complete — Done' : 'Transfer Finished with Errors — Close',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                 ),
                 onPressed: onDone,
               ),
@@ -276,6 +280,13 @@ class TransferQueueScreen extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (file.status == TransferStatus.failed && file.errorMessage != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        file.errorMessage!,
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 11),
+                      ),
+                    ],
                   ],
                 ),
               );

@@ -17,11 +17,13 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.Executors
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.universal.filetransfer/native"
     private var multicastLock: WifiManager.MulticastLock? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
+    private val ioExecutor = Executors.newSingleThreadExecutor()
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -110,11 +112,13 @@ class MainActivity: FlutterActivity() {
                         return@setMethodCallHandler
                     }
 
-                    try {
-                        val destination = saveFileUsingMediaStore(tempPath, fileName, mimeType, isMedia = false, isVideo = false)
-                        result.success(destination)
-                    } catch (e: Exception) {
-                        result.error("SAVE_FAILED", "Failed to save file to Downloads: ${e.message}", null)
+                    ioExecutor.execute {
+                        try {
+                            val destination = saveFileUsingMediaStore(tempPath, fileName, mimeType, isMedia = false, isVideo = false)
+                            runOnUiThread { result.success(destination) }
+                        } catch (e: Exception) {
+                            runOnUiThread { result.error("SAVE_FAILED", "Failed to save file to Downloads: ${e.message}", null) }
+                        }
                     }
                 }
 
@@ -130,11 +134,13 @@ class MainActivity: FlutterActivity() {
                         return@setMethodCallHandler
                     }
 
-                    try {
-                        val destination = saveFileUsingMediaStore(tempPath, fileName, mimeType, isMedia = true, isVideo = isVideo)
-                        result.success(destination)
-                    } catch (e: Exception) {
-                        result.error("SAVE_FAILED", "Failed to save media to Gallery: ${e.message}", null)
+                    ioExecutor.execute {
+                        try {
+                            val destination = saveFileUsingMediaStore(tempPath, fileName, mimeType, isMedia = true, isVideo = isVideo)
+                            runOnUiThread { result.success(destination) }
+                        } catch (e: Exception) {
+                            runOnUiThread { result.error("SAVE_FAILED", "Failed to save media to Gallery: ${e.message}", null) }
+                        }
                     }
                 }
 

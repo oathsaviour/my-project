@@ -65,27 +65,54 @@ class TransferClient {
     // Acquire screen and CPU wake lock to prevent Doze mode or screen auto-lock
     await WakeLockManager.acquireWakeLock(reason: 'Sending files to ${targetDevice.name}');
 
+    bool hasError = false;
     try {
       final baseUrl = 'http://${targetDevice.ipAddress}:${targetDevice.port}';
 
       // Step 1: Handshake
       final handshakeOk = await _performHandshake(baseUrl, targetDevice.sessionToken, authPin);
       if (!handshakeOk) {
-        throw const SocketException('Handshake rejected: invalid PIN or authentication token');
+        const msg = 'Handshake rejected: invalid PIN or authentication token';
+        if (filesToSend.isNotEmpty) {
+          onError?.call(filesToSend.first.fileId, msg);
+        }
+        throw const SocketException(msg);
       }
 
+      // Compute streaming SHA-256 for any file missing an expected hash
+      final enrichedFiles = <FileManifestItem>[];
+      for (final fileItem in filesToSend) {
+        if (_isCanceled) break;
+        if ((fileItem.expectedSha256 == null || fileItem.expectedSha256!.isEmpty) &&
+            fileItem.localFilePath != null &&
+            await File(fileItem.localFilePath!).exists()) {
+          final digest = await ChecksumStream.computeFileSha256(fileItem.localFilePath!);
+          enrichedFiles.add(fileItem.copyWith(expectedSha256: digest));
+        } else {
+          enrichedFiles.add(fileItem);
+        }
+      }
+
+      if (_isCanceled) return false;
+
       // Step 2: Send Manifest & Check Resume Offsets
-      final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, filesToSend);
+      final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, enrichedFiles);
 
       // Step 3: Stream files chunk by chunk
-      for (final fileItem in filesToSend) {
+      for (final fileItem in enrichedFiles) {
         if (_isCanceled) break;
 
         final startOffset = resumeOffsets[fileItem.fileId] ?? 0;
-        await _streamSingleFile(baseUrl, fileItem, startOffset);
+        final ok = await _streamSingleFile(baseUrl, fileItem, startOffset);
+        if (!ok) {
+          hasError = true;
+        }
       }
 
-      return !_isCanceled;
+      return !_isCanceled && !hasError;
+    } catch (e) {
+      hasError = true;
+      rethrow;
     } finally {
       await WakeLockManager.releaseWakeLock();
     }
@@ -103,6 +130,7 @@ class TransferClient {
       }));
 
       final response = await request.close();
+      await response.drain<void>();
       return response.statusCode == HttpStatus.ok;
     } catch (_) {
       return false;
@@ -144,20 +172,20 @@ class TransferClient {
     return offsets;
   }
 
-  Future<void> _streamSingleFile(
+  Future<bool> _streamSingleFile(
     String baseUrl,
     FileManifestItem item,
     int resumeOffsetBytes,
   ) async {
     if (item.localFilePath == null) {
       onError?.call(item.fileId, 'Local file path is missing');
-      return;
+      return false;
     }
 
     final localFile = File(item.localFilePath!);
     if (!await localFile.exists()) {
       onError?.call(item.fileId, 'File not found on device');
-      return;
+      return false;
     }
 
     final totalSize = await localFile.length();
@@ -252,15 +280,19 @@ class TransferClient {
             Duration.zero,
             TransferStatus.completed,
           );
+          return true;
         } else {
           onError?.call(item.fileId, 'Checksum validation failed at receiver');
+          return false;
         }
       }
+      return true;
     } catch (e) {
       try {
         await raf.close();
       } catch (_) {}
       onError?.call(item.fileId, e.toString());
+      return false;
     }
   }
 
@@ -282,6 +314,7 @@ class TransferClient {
 
     request.add(chunkBytes);
     final response = await request.close();
+    await response.drain<void>();
 
     return response.statusCode == HttpStatus.ok;
   }
@@ -293,6 +326,7 @@ class TransferClient {
 
     request.write(jsonEncode({'fileId': fileId}));
     final response = await request.close();
+    await response.drain<void>();
 
     return response.statusCode == HttpStatus.ok;
   }

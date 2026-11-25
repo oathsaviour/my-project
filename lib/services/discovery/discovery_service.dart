@@ -4,6 +4,7 @@ import 'dart:io';
 import '../../core/models/discovered_device.dart';
 import '../../core/security/qr_payload.dart';
 import '../../core/security/pin_generator.dart';
+import 'mdns_discovery.dart';
 
 abstract class IDiscoveryService {
   Stream<List<DiscoveredDevice>> get discoveredDevicesStream;
@@ -26,6 +27,7 @@ class DiscoveryManager implements IDiscoveryService {
   final Map<String, DiscoveredDevice> _devices = {};
 
   RawDatagramSocket? _udpSocket;
+  MdnsDiscoveryEngine? _mdnsEngine;
   Timer? _beaconTimer;
   Timer? _pruneTimer;
 
@@ -63,7 +65,24 @@ class DiscoveryManager implements IDiscoveryService {
         final name = interface.name.toLowerCase();
         for (final addr in interface.addresses) {
           if (!addr.isLoopback &&
-              (name.contains('wlan') || name.contains('ap') || name.contains('en0') || name.contains('eth'))) {
+              (name.contains('wlan') ||
+                  name.contains('wi-fi') ||
+                  name.contains('wifi') ||
+                  name.contains('swlan') ||
+                  name.contains('ap') ||
+                  name.contains('bridge') ||
+                  name.contains('en0') ||
+                  name.contains('eth'))) {
+            _localIp = addr.address;
+            return _localIp;
+          }
+        }
+      }
+
+      // Prefer private RFC1918 LAN addresses over virtual/tunnel interfaces
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (!addr.isLoopback && _isPrivateLanIp(addr.address)) {
             _localIp = addr.address;
             return _localIp;
           }
@@ -111,18 +130,52 @@ class DiscoveryManager implements IDiscoveryService {
 
     await resolveLocalIp();
     await _startUdpBeacon();
+    await _startMdnsDiscovery();
     _notifyDevices();
+  }
+
+  bool _isPrivateLanIp(String ip) {
+    return ip.startsWith('192.168.') ||
+        ip.startsWith('10.') ||
+        RegExp(r'^172\.(1[6-9]|2\d|3[0-1])\.').hasMatch(ip);
+  }
+
+  Future<void> _startMdnsDiscovery() async {
+    _mdnsEngine?.stop();
+    _mdnsEngine = MdnsDiscoveryEngine(
+      onDeviceDiscovered: (device) {
+        if (device.ipAddress != _localIp) {
+          addOrUpdateDevice(device);
+        }
+      },
+    );
+    await _mdnsEngine!.start(
+      localIp: _localIp ?? '127.0.0.1',
+      localPort: _transferPort,
+      deviceName: _localDeviceName,
+      os: _localOs,
+      sessionToken: _sessionToken,
+    );
   }
 
   Future<void> _startUdpBeacon() async {
     try {
       _udpSocket?.close();
-      _udpSocket = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4,
-        discoveryUdpPort,
-        reuseAddress: true,
-        reusePort: true,
-      );
+      try {
+        _udpSocket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          discoveryUdpPort,
+          reuseAddress: true,
+          reusePort: true,
+        );
+      } catch (_) {
+        // Windows and some Android versions do not support SO_REUSEPORT
+        _udpSocket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          discoveryUdpPort,
+          reuseAddress: true,
+        );
+      }
       _udpSocket!.broadcastEnabled = true;
 
       _udpSocket!.listen((RawSocketEvent event) {
@@ -216,6 +269,8 @@ class DiscoveryManager implements IDiscoveryService {
     _isDiscovering = false;
     _beaconTimer?.cancel();
     _pruneTimer?.cancel();
+    _mdnsEngine?.stop();
+    _mdnsEngine = null;
     _udpSocket?.close();
     _udpSocket = null;
     _devices.clear();

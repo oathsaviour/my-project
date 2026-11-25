@@ -180,7 +180,13 @@ class TransferServer {
     final responseFiles = <Map<String, dynamic>>[];
 
     for (final item in manifestItems) {
-      _activeFiles[item.fileId] = item;
+      final existingHandle = _openFileHandles.remove(item.fileId);
+      if (existingHandle != null) {
+        try {
+          await existingHandle.close();
+        } catch (_) {}
+      }
+
       final tempPath = '$_tempStorageDir/${item.fileId}.part';
       _tempFilePaths[item.fileId] = tempPath;
 
@@ -195,11 +201,18 @@ class TransferServer {
         confirmedBytes = actualLength;
         confirmedChunks = checkpoint.confirmedChunks;
       } else {
-        // Create fresh part file
+        // Create or truncate fresh part file
         await file.create(recursive: true);
       }
 
-      final raf = await file.open(mode: FileMode.append);
+      _activeFiles[item.fileId] = item.copyWith(
+        transferredBytes: confirmedBytes,
+        confirmedChunks: confirmedChunks,
+      );
+
+      final raf = await file.open(
+        mode: confirmedBytes > 0 ? FileMode.writeOnlyAppend : FileMode.writeOnly,
+      );
       _openFileHandles[item.fileId] = raf;
 
       responseFiles.add({
@@ -258,12 +271,17 @@ class TransferServer {
       }
     }
 
-    // Write directly to disk
+    final item = _activeFiles[fileId]!;
+    final chunkOffset = chunkIndex * item.chunkSize;
+
+    // Write directly to disk at exact chunk offset (idempotent on retry/resume)
+    await raf.setPosition(chunkOffset);
     await raf.writeFrom(chunkBytes);
     await raf.flush();
 
-    final item = _activeFiles[fileId]!;
-    final updatedTransferred = item.transferredBytes + chunkBytes.length;
+    final endOffset = chunkOffset + chunkBytes.length;
+    final updatedTransferred =
+        endOffset > item.transferredBytes ? endOffset : item.transferredBytes;
     final updatedConfirmedChunks = chunkIndex + 1;
 
     _activeFiles[fileId] = item.copyWith(

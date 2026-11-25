@@ -117,13 +117,23 @@ class AutoSaveRouter {
       final ext = dot != -1 ? fileName.substring(dot) : '';
       final uniqueName = '${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
       final finalTarget = File('$targetDir/$uniqueName');
-      await tempFile.rename(finalTarget.path);
+      await _moveFile(tempFile, finalTarget.path);
       await _notifySystemMedia(finalTarget.path, category, mimeType);
       return finalTarget.path;
     } else {
-      await tempFile.rename(targetFile.path);
+      await _moveFile(tempFile, targetFile.path);
       await _notifySystemMedia(targetFile.path, category, mimeType);
       return targetFile.path;
+    }
+  }
+
+  static Future<void> _moveFile(File source, String destinationPath) async {
+    try {
+      await source.rename(destinationPath);
+    } on FileSystemException {
+      // Cross-device / different mount point fallback
+      await source.copy(destinationPath);
+      await source.delete();
     }
   }
 
