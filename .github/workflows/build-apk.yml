@@ -16,6 +16,50 @@ jobs:
         with:
           channel: 'stable'
       - run: flutter config --jdk-dir=$JAVA_HOME
+      - name: Cache Pub and Gradle Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-flutter-gradle-${{ hashFiles('pubspec.yaml', 'android/build.gradle*', 'android/app/build.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-gradle-
+      - name: Configure Gradle Maven Central Mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat << 'EOF' > ~/.gradle/init.d/maven-mirror.init.gradle.kts
+          import org.gradle.api.artifacts.dsl.RepositoryHandler
+          import org.gradle.api.artifacts.repositories.MavenArtifactRepository
+
+          fun RepositoryHandler.injectMavenCentralMirror() {
+              val mirrorUrl = "https://maven-central.storage-download.googleapis.com/maven2/"
+              if (none { it is MavenArtifactRepository && it.url.toString() == mirrorUrl }) {
+                  val mirror = maven {
+                      name = "GoogleMavenCentralMirror"
+                      url = uri(mirrorUrl)
+                  }
+                  val mavenCentralIndex = indexOfFirst {
+                      it is MavenArtifactRepository && it.url.toString().contains("repo.maven.apache.org")
+                  }
+                  if (mavenCentralIndex >= 0) {
+                      remove(mirror)
+                      add(mavenCentralIndex, mirror)
+                  }
+              }
+          }
+
+          gradle.settingsEvaluated {
+              pluginManagement.repositories.injectMavenCentralMirror()
+              dependencyResolutionManagement.repositories.injectMavenCentralMirror()
+          }
+
+          gradle.allprojects {
+              buildscript.repositories.injectMavenCentralMirror()
+              repositories.injectMavenCentralMirror()
+          }
+          EOF
       - name: Prepare Android NDK & Project Config
         run: |
           # Detect pre-installed NDK on ubuntu-latest runner (avoids 1.5GB network download & zip corruption)

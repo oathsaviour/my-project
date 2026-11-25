@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:test/test.dart';
 import '../lib/core/models/discovered_device.dart';
 import '../lib/core/security/qr_payload.dart';
