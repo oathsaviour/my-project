@@ -12,23 +12,56 @@ class TransferQueueScreen extends StatelessWidget {
   final VoidCallback onResume;
   final VoidCallback onCancel;
   final VoidCallback onDone;
+  final VoidCallback? onSendMore;
 
   const TransferQueueScreen({
-    Key? key,
+    super.key,
     required this.session,
     required this.onPause,
     required this.onResume,
     required this.onCancel,
     required this.onDone,
-  }) : super(key: key);
+    this.onSendMore,
+  });
 
   @override
   Widget build(BuildContext context) {
     final activeFile = session.activeFile;
     final isIos = session.peer.os == DeviceOS.ios;
     final peerColor = isIos ? AppTheme.appleBlue : AppTheme.androidGreen;
+    final allFinished = session.isCompleted ||
+        session.files.every((f) => f.isCompleted || f.status == TransferStatus.failed);
 
-    return Scaffold(
+    return PopScope(
+      canPop: allFinished,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final confirm = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppTheme.darkSurface,
+            title: const Text('Transfer in Progress', style: TextStyle(color: AppTheme.textPrimary)),
+            content: const Text(
+              'Leaving now will cancel the active transfer. You can switch to another app without canceling.',
+              style: TextStyle(color: AppTheme.textSecondary),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Keep Transferring'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Cancel Transfer', style: TextStyle(color: Colors.redAccent)),
+              ),
+            ],
+          ),
+        );
+        if (confirm == true) {
+          onCancel();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -184,19 +217,41 @@ class TransferQueueScreen extends StatelessWidget {
               else
                 const SizedBox.shrink()
             else
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: session.isCompleted ? AppTheme.accentGreen : Colors.redAccent,
-                  foregroundColor: session.isCompleted ? AppTheme.darkBackground : Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                icon: Icon(session.isCompleted ? Icons.check_circle : Icons.error_outline, size: 22),
-                label: Text(
-                  session.isCompleted ? 'Transfer Complete — Done' : 'Transfer Finished with Errors — Close',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                ),
-                onPressed: onDone,
+              Row(
+                children: [
+                  if (session.direction == TransferDirection.outgoing && onSendMore != null) ...[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppTheme.accentNeon,
+                          side: const BorderSide(color: AppTheme.accentNeon),
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        icon: const Icon(Icons.add_circle_outline, size: 20),
+                        label: const Text('Send More', style: TextStyle(fontWeight: FontWeight.bold)),
+                        onPressed: onSendMore,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                  ],
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: session.isCompleted ? AppTheme.accentGreen : Colors.redAccent,
+                        foregroundColor: session.isCompleted ? AppTheme.darkBackground : Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      icon: Icon(session.isCompleted ? Icons.check_circle : Icons.error_outline, size: 22),
+                      label: Text(
+                        session.isCompleted ? 'Done' : 'Close',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      onPressed: onDone,
+                    ),
+                  ),
+                ],
               ),
 
             const SizedBox(height: 24),
@@ -294,6 +349,7 @@ class TransferQueueScreen extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 

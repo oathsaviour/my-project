@@ -10,15 +10,17 @@ class RadarScreen extends StatefulWidget {
   final ValueChanged<DiscoveredDevice> onSelectDevice;
   final VoidCallback onOpenQrPairing;
   final VoidCallback onOpenHotspotGuide;
+  final VoidCallback? onRefresh;
 
   const RadarScreen({
-    Key? key,
+    super.key,
     required this.discoveredDevices,
     required this.isScanning,
     required this.onSelectDevice,
     required this.onOpenQrPairing,
     required this.onOpenHotspotGuide,
-  }) : super(key: key);
+    this.onRefresh,
+  });
 
   @override
   State<RadarScreen> createState() => _RadarScreenState();
@@ -54,6 +56,12 @@ class _RadarScreenState extends State<RadarScreen> with SingleTickerProviderStat
           ],
         ),
         actions: [
+          if (widget.onRefresh != null)
+            IconButton(
+              tooltip: 'Rescan Nearby Devices',
+              icon: const Icon(Icons.refresh, color: AppTheme.textPrimary),
+              onPressed: widget.onRefresh,
+            ),
           IconButton(
             tooltip: 'Hotspot Bridge Guide',
             icon: const Icon(Icons.wifi_tethering, color: AppTheme.warningAmber),

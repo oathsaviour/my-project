@@ -256,15 +256,13 @@ class _MainAppShellState extends State<MainAppShell> {
       await [
         Permission.nearbyWifiDevices,
         Permission.locationWhenInUse,
-        Permission.camera,
         Permission.photos,
         Permission.videos,
         Permission.audio,
-        Permission.storage,
+        Permission.notification,
       ].request();
     } else if (Platform.isIOS) {
       await [
-        Permission.camera,
         Permission.photos,
       ].request();
     }
@@ -323,6 +321,15 @@ class _MainAppShellState extends State<MainAppShell> {
                 _activeSessionNotifier.value = null;
                 Navigator.of(context).pop();
               },
+              onSendMore: session.direction == TransferDirection.outgoing
+                  ? () {
+                      final peer = session.peer;
+                      final pin = session.authPin;
+                      _activeSessionNotifier.value = null;
+                      Navigator.of(context).pop();
+                      _onSelectDevice(peer, authPin: pin);
+                    }
+                  : null,
             );
           },
         ),
@@ -465,6 +472,7 @@ class _MainAppShellState extends State<MainAppShell> {
           onSelectDevice: _onSelectDevice,
           onOpenQrPairing: _openQrPairing,
           onOpenHotspotGuide: _openHotspotGuide,
+          onRefresh: _discoveryManager.refreshDiscovery,
         );
       },
     );

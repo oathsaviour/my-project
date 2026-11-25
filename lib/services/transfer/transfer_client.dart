@@ -79,31 +79,24 @@ class TransferClient {
         throw const SocketException(msg);
       }
 
-      // Compute streaming SHA-256 for any file missing an expected hash
-      final enrichedFiles = <FileManifestItem>[];
-      for (final fileItem in filesToSend) {
-        if (_isCanceled) break;
-        if ((fileItem.expectedSha256 == null || fileItem.expectedSha256!.isEmpty) &&
-            fileItem.localFilePath != null &&
-            await File(fileItem.localFilePath!).exists()) {
-          final digest = await ChecksumStream.computeFileSha256(fileItem.localFilePath!);
-          enrichedFiles.add(fileItem.copyWith(expectedSha256: digest));
-        } else {
-          enrichedFiles.add(fileItem);
-        }
-      }
-
       if (_isCanceled) return false;
 
-      // Step 2: Send Manifest & Check Resume Offsets
-      final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, enrichedFiles);
+      // Step 2: Send Manifest & Check Resume Offsets (no pre-read hashing delay for 5GB+ files)
+      final resumeOffsets = await _sendManifest(baseUrl, senderName, authPin, filesToSend);
 
-      // Step 3: Stream files chunk by chunk
-      for (final fileItem in enrichedFiles) {
+      // Step 3: Stream files chunk by chunk (with streaming SHA-256 + auto-reconnect on drop)
+      for (final fileItem in filesToSend) {
         if (_isCanceled) break;
 
         final startOffset = resumeOffsets[fileItem.fileId] ?? 0;
-        final ok = await _streamSingleFile(baseUrl, fileItem, startOffset);
+        final ok = await _streamSingleFile(
+          baseUrl: baseUrl,
+          senderName: senderName,
+          authPin: authPin,
+          token: targetDevice.sessionToken,
+          item: fileItem,
+          resumeOffsetBytes: startOffset,
+        );
         if (!ok) {
           hasError = true;
         }
@@ -172,11 +165,14 @@ class TransferClient {
     return offsets;
   }
 
-  Future<bool> _streamSingleFile(
-    String baseUrl,
-    FileManifestItem item,
-    int resumeOffsetBytes,
-  ) async {
+  Future<bool> _streamSingleFile({
+    required String baseUrl,
+    required String senderName,
+    required String authPin,
+    required String token,
+    required FileManifestItem item,
+    required int resumeOffsetBytes,
+  }) async {
     if (item.localFilePath == null) {
       onError?.call(item.fileId, 'Local file path is missing');
       return false;
@@ -196,13 +192,21 @@ class TransferClient {
     int currentOffset = resumeOffsetBytes;
     int chunkIndex = (resumeOffsetBytes ~/ chunkSize);
 
+    // Compute full-file SHA-256 incrementally while streaming (zero pre-read delay)
+    _DigestSink? fullDigestSink;
+    ByteConversionSink? fullShaSink;
+    if (resumeOffsetBytes == 0 && (item.expectedSha256 == null || item.expectedSha256!.isEmpty)) {
+      fullDigestSink = _DigestSink();
+      fullShaSink = sha256.startChunkedConversion(fullDigestSink);
+    }
+
     try {
       if (currentOffset > 0) {
         await raf.setPosition(currentOffset);
       }
 
       while (currentOffset < totalSize && !_isCanceled) {
-        // Handle Pause state
+        // Handle manual Pause state
         while (_isPaused && !_isCanceled) {
           onProgress?.call(
             item.fileId,
@@ -221,23 +225,58 @@ class TransferClient {
             ? (totalSize - currentOffset)
             : chunkSize;
 
+        await raf.setPosition(currentOffset);
         final chunkData = await raf.read(bytesToRead);
         final chunkSha256 = sha256.convert(chunkData).toString();
 
-        // Transmit chunk with flow control
-        final success = await _uploadChunk(
-          baseUrl: baseUrl,
-          fileId: item.fileId,
-          chunkIndex: chunkIndex,
-          totalChunks: totalChunks,
-          chunkBytes: chunkData,
-          chunkSha256: chunkSha256,
-        );
-
-        if (!success) {
-          throw SocketException('Failed to upload chunk $chunkIndex');
+        bool uploaded = false;
+        try {
+          uploaded = await _uploadChunk(
+            baseUrl: baseUrl,
+            fileId: item.fileId,
+            chunkIndex: chunkIndex,
+            totalChunks: totalChunks,
+            chunkBytes: chunkData,
+            chunkSha256: chunkSha256,
+          );
+        } on IOException {
+          uploaded = false;
+        } on TimeoutException {
+          uploaded = false;
+        } on HttpException {
+          uploaded = false;
         }
 
+        if (!uploaded) {
+          // Connection dropped (e.g. Wi-Fi toggled): pause and wait up to 5 minutes to auto-resume
+          final resumedOffset = await _waitForReconnectAndResumeOffset(
+            baseUrl: baseUrl,
+            senderName: senderName,
+            authPin: authPin,
+            token: token,
+            item: item,
+            currentOffset: currentOffset,
+            totalSize: totalSize,
+          );
+          if (resumedOffset == null) {
+            throw const SocketException('Connection lost and could not reconnect within 5 minutes');
+          }
+          // If server already has this chunk, advance offset; otherwise retry from resumedOffset
+          if (resumedOffset != currentOffset) {
+            // Recompute or disable incremental full hash if offset jumped
+            if (resumedOffset > currentOffset && fullShaSink != null && resumedOffset <= currentOffset + chunkData.length) {
+              fullShaSink.add(chunkData);
+            } else {
+              fullShaSink = null;
+              fullDigestSink = null;
+            }
+            currentOffset = resumedOffset;
+            chunkIndex = currentOffset ~/ chunkSize;
+          }
+          continue;
+        }
+
+        fullShaSink?.add(chunkData);
         currentOffset += chunkData.length;
         chunkIndex++;
 
@@ -259,6 +298,12 @@ class TransferClient {
       await raf.close();
 
       if (!_isCanceled && currentOffset >= totalSize) {
+        String? computedFullSha256 = item.expectedSha256;
+        if (fullShaSink != null && fullDigestSink != null) {
+          fullShaSink.close();
+          computedFullSha256 = fullDigestSink.value?.toString();
+        }
+
         // Step 4: Finalize & Checksum Verification
         onProgress?.call(
           item.fileId,
@@ -269,7 +314,11 @@ class TransferClient {
           TransferStatus.verifyingChecksum,
         );
 
-        final finalizeOk = await _finalizeFile(baseUrl, item.fileId);
+        final finalizeOk = await _finalizeFile(
+          baseUrl,
+          item.fileId,
+          expectedSha256: computedFullSha256,
+        );
         if (finalizeOk) {
           onFileCompleted?.call(item.fileId);
           onProgress?.call(
@@ -296,6 +345,56 @@ class TransferClient {
     }
   }
 
+  /// Polls the receiver every 2 seconds until the connection recovers, then returns the
+  /// exact byte offset to resume from. Returns null if canceled or timed out after 5 minutes.
+  Future<int?> _waitForReconnectAndResumeOffset({
+    required String baseUrl,
+    required String senderName,
+    required String authPin,
+    required String token,
+    required FileManifestItem item,
+    required int currentOffset,
+    required int totalSize,
+  }) async {
+    const maxAttempts = 150; // 150 * 2s = 5 minutes
+    for (int attempt = 0; attempt < maxAttempts && !_isCanceled; attempt++) {
+      onProgress?.call(
+        item.fileId,
+        currentOffset,
+        totalSize,
+        0.0,
+        null,
+        TransferStatus.paused,
+      );
+
+      await Future.delayed(const Duration(seconds: 2));
+      if (_isCanceled) return null;
+
+      try {
+        final statusUri = Uri.parse('$baseUrl/api/v1/transfer/status?fileId=${item.fileId}');
+        final statusReq = await _httpClient.getUrl(statusUri).timeout(const Duration(seconds: 3));
+        final statusRes = await statusReq.close().timeout(const Duration(seconds: 3));
+        final body = await utf8.decodeStream(statusRes);
+
+        if (statusRes.statusCode == HttpStatus.ok) {
+          final data = jsonDecode(body) as Map<String, dynamic>;
+          return (data['transferredBytes'] as num?)?.toInt() ?? currentOffset;
+        }
+
+        if (statusRes.statusCode == HttpStatus.notFound) {
+          final ok = await _performHandshake(baseUrl, token, authPin);
+          if (ok) {
+            final offsets = await _sendManifest(baseUrl, senderName, authPin, [item]);
+            return offsets[item.fileId] ?? 0;
+          }
+        }
+      } catch (_) {
+        // Still offline; continue waiting
+      }
+    }
+    return null;
+  }
+
   Future<bool> _uploadChunk({
     required String baseUrl,
     required String fileId,
@@ -319,12 +418,15 @@ class TransferClient {
     return response.statusCode == HttpStatus.ok;
   }
 
-  Future<bool> _finalizeFile(String baseUrl, String fileId) async {
+  Future<bool> _finalizeFile(String baseUrl, String fileId, {String? expectedSha256}) async {
     final uri = Uri.parse('$baseUrl/api/v1/transfer/finalize');
     final request = await _httpClient.postUrl(uri);
     request.headers.contentType = ContentType.json;
 
-    request.write(jsonEncode({'fileId': fileId}));
+    request.write(jsonEncode({
+      'fileId': fileId,
+      if (expectedSha256 != null && expectedSha256.isNotEmpty) 'expectedSha256': expectedSha256,
+    }));
     final response = await request.close();
     await response.drain<void>();
 
@@ -334,4 +436,16 @@ class TransferClient {
   void dispose() {
     _httpClient.close(force: true);
   }
+}
+
+class _DigestSink implements Sink<Digest> {
+  Digest? value;
+
+  @override
+  void add(Digest data) {
+    value = data;
+  }
+
+  @override
+  void close() {}
 }

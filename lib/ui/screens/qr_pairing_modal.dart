@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/models/discovered_device.dart';
 import '../../core/security/qr_payload.dart';
@@ -29,6 +30,8 @@ class _QrPairingModalState extends State<QrPairingModal> {
   final TextEditingController _manualPinController = TextEditingController();
   MobileScannerController? _scannerController;
   bool _hasHandledScan = false;
+  bool _hasCameraPermission = false;
+  bool _isCheckingCamera = false;
   String? _scanError;
 
   @override
@@ -40,18 +43,47 @@ class _QrPairingModalState extends State<QrPairingModal> {
     super.dispose();
   }
 
-  void _selectTab(_PairingTab tab) {
+  Future<void> _selectTab(_PairingTab tab) async {
     setState(() {
       _activeTab = tab;
       _scanError = null;
       _hasHandledScan = false;
-      if (tab == _PairingTab.scanQr) {
-        _scannerController ??= MobileScannerController();
-      } else {
-        _scannerController?.dispose();
-        _scannerController = null;
-      }
     });
+
+    if (tab == _PairingTab.scanQr) {
+      await _ensureCameraAndStartScanner();
+    } else {
+      await _scannerController?.stop();
+      await _scannerController?.dispose();
+      _scannerController = null;
+    }
+  }
+
+  Future<void> _ensureCameraAndStartScanner() async {
+    setState(() => _isCheckingCamera = true);
+    final status = await Permission.camera.request();
+    if (!mounted) return;
+
+    if (status.isGranted) {
+      _scannerController?.dispose();
+      _scannerController = MobileScannerController(
+        detectionSpeed: DetectionSpeed.normal,
+        facing: CameraFacing.back,
+      );
+      setState(() {
+        _hasCameraPermission = true;
+        _isCheckingCamera = false;
+        _scanError = null;
+      });
+    } else {
+      setState(() {
+        _hasCameraPermission = false;
+        _isCheckingCamera = false;
+        _scanError = status.isPermanentlyDenied
+            ? 'Camera permission permanently denied. Enable it in App Settings to scan QR codes.'
+            : 'Camera permission is required only when scanning a QR code.';
+      });
+    }
   }
 
   void _onBarcodeDetected(BarcodeCapture capture) {
@@ -62,6 +94,7 @@ class _QrPairingModalState extends State<QrPairingModal> {
       final parsed = QrPairingPayload.parse(raw);
       if (parsed != null) {
         _hasHandledScan = true;
+        _scannerController?.stop();
         Navigator.of(context).pop();
         widget.onPeerScanned(parsed);
         return;
@@ -164,17 +197,68 @@ class _QrPairingModalState extends State<QrPairingModal> {
                 ),
               ],
             ] else if (_activeTab == _PairingTab.scanQr) ...[
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
+              if (_isCheckingCamera)
+                const SizedBox(
                   height: 260,
+                  child: Center(child: CircularProgressIndicator(color: AppTheme.accentNeon)),
+                )
+              else if (_hasCameraPermission && _scannerController != null)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: SizedBox(
+                    height: 260,
+                    width: double.infinity,
+                    child: MobileScanner(
+                      controller: _scannerController!,
+                      onDetect: _onBarcodeDetected,
+                      errorBuilder: (context, error, child) {
+                        return Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Text(
+                              'Camera error: ${error.errorDetails?.message ?? error.errorCode.name}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.redAccent),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                )
+              else
+                Container(
+                  height: 220,
                   width: double.infinity,
-                  child: MobileScanner(
-                    controller: _scannerController,
-                    onDetect: _onBarcodeDetected,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppTheme.darkCard,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.no_photography, size: 40, color: AppTheme.warningAmber),
+                      const SizedBox(height: 12),
+                      Text(
+                        _scanError ?? 'Camera permission is needed to scan QR codes.',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+                      ),
+                      const SizedBox(height: 12),
+                      ElevatedButton(
+                        onPressed: () async {
+                          if (await Permission.camera.isPermanentlyDenied) {
+                            await openAppSettings();
+                          } else {
+                            await _ensureCameraAndStartScanner();
+                          }
+                        },
+                        child: const Text('Grant Camera Access'),
+                      ),
+                    ],
                   ),
                 ),
-              ),
               const SizedBox(height: 12),
               Text(
                 _scanError ?? 'Point your camera at the receiver\'s Universal Transfer QR code.',

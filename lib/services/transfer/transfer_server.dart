@@ -163,8 +163,10 @@ class TransferServer {
 
     final manifestItems = rawFiles.map((f) => FileManifestItem.fromJson(f)).toList();
 
-    // Trigger receiver acceptance callback
-    if (onManifestReceived != null) {
+    // Trigger receiver acceptance callback (skip prompt when resuming an already-accepted file)
+    final isResume = manifestItems.isNotEmpty &&
+        manifestItems.every((m) => _activeFiles.containsKey(m.fileId));
+    if (onManifestReceived != null && !isResume) {
       final accepted = await onManifestReceived!(senderName, manifestItems, pin);
       if (!accepted) {
         request.response.statusCode = HttpStatus.forbidden;
@@ -365,12 +367,13 @@ class TransferServer {
     final computedSha256 = await ChecksumStream.computeFileSha256(tempPath);
 
     // Step 2: Verify checksum if expected hash was provided
-    if (item.expectedSha256 != null && item.expectedSha256!.isNotEmpty) {
-      if (!ChecksumStream.verifyChecksum(computedSha256, item.expectedSha256!)) {
+    final expectedSha256 = (data['expectedSha256'] as String?) ?? item.expectedSha256;
+    if (expectedSha256 != null && expectedSha256.isNotEmpty) {
+      if (!ChecksumStream.verifyChecksum(computedSha256, expectedSha256)) {
         request.response.statusCode = HttpStatus.expectationFailed;
         request.response.write(jsonEncode({
           'error': 'File SHA-256 mismatch',
-          'expected': item.expectedSha256,
+          'expected': expectedSha256,
           'actual': computedSha256,
         }));
         await request.response.close();

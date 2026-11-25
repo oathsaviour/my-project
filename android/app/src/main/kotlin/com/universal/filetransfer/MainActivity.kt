@@ -2,6 +2,7 @@ package com.universal.filetransfer
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -78,6 +79,18 @@ class MainActivity: FlutterActivity() {
                             // 2-hour safety timeout to prevent permanent battery drain if app crashes
                             cpuWakeLock?.acquire(2 * 60 * 60 * 1000L)
                         }
+
+                        // 3. Start Foreground Service so Android does not kill sockets when app goes to background
+                        val reason = call.argument<String>("reason") ?: "Transferring files..."
+                        val serviceIntent = Intent(applicationContext, TransferForegroundService::class.java).apply {
+                            putExtra(TransferForegroundService.EXTRA_REASON, reason)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            applicationContext.startForegroundService(serviceIntent)
+                        } else {
+                            applicationContext.startService(serviceIntent)
+                        }
+
                         result.success(true)
                     } catch (e: Exception) {
                         result.error("WAKELOCK_ERROR", "Failed to acquire wake lock: ${e.message}", null)
@@ -94,6 +107,9 @@ class MainActivity: FlutterActivity() {
                         if (cpuWakeLock?.isHeld == true) {
                             cpuWakeLock?.release()
                         }
+
+                        // 3. Stop Foreground Service
+                        applicationContext.stopService(Intent(applicationContext, TransferForegroundService::class.java))
                         result.success(true)
                     } catch (e: Exception) {
                         result.error("WAKELOCK_ERROR", "Failed to release wake lock: ${e.message}", null)

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import '../../core/models/discovered_device.dart';
 import '../../core/security/qr_payload.dart';
 import '../../core/security/pin_generator.dart';
@@ -169,12 +170,17 @@ class DiscoveryManager implements IDiscoveryService {
           reusePort: true,
         );
       } catch (_) {
-        // Windows and some Android versions do not support SO_REUSEPORT
-        _udpSocket = await RawDatagramSocket.bind(
-          InternetAddress.anyIPv4,
-          discoveryUdpPort,
-          reuseAddress: true,
-        );
+        try {
+          // Windows and some Android versions do not support SO_REUSEPORT
+          _udpSocket = await RawDatagramSocket.bind(
+            InternetAddress.anyIPv4,
+            discoveryUdpPort,
+            reuseAddress: true,
+          );
+        } catch (_) {
+          // Fallback to ephemeral port so outbound hotspot unicast pings still work
+          _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+        }
       }
       _udpSocket!.broadcastEnabled = true;
 
@@ -199,10 +205,12 @@ class DiscoveryManager implements IDiscoveryService {
     } catch (_) {}
   }
 
-  void _sendBeacon() async {
-    if (_udpSocket == null || !_isDiscovering) return;
+  Future<void> refreshDiscovery() async {
     await resolveLocalIp();
+    _sendBeacon();
+  }
 
+  Uint8List _buildBeaconBytes({bool isReply = false}) {
     final payload = jsonEncode({
       'magic': 'USHR_DISCOVERY_V1',
       'id': _localDeviceId,
@@ -212,24 +220,47 @@ class DiscoveryManager implements IDiscoveryService {
       'port': _transferPort,
       'token': _sessionToken,
       'pin': _verificationPin,
+      'reply': isReply,
       'version': '1.0.0',
     });
+    return Uint8List.fromList(utf8.encode(payload));
+  }
 
-    final bytes = utf8.encode(payload);
+  void _sendBeacon() async {
+    if (_udpSocket == null || !_isDiscovering) return;
+    await resolveLocalIp();
 
-    // Send to global broadcast and subnet broadcast (for Hotspot / tethering)
+    final bytes = _buildBeaconBytes();
+
+    // 1. Global broadcast & subnet broadcast (Shared Wi-Fi Router)
     try {
       _udpSocket!.send(bytes, InternetAddress('255.255.255.255'), discoveryUdpPort);
     } catch (_) {}
+
+    final unicastTargets = <String>{
+      '192.168.43.1', // Android Hotspot host
+      '192.168.49.1', // Wi-Fi Direct / Android P2P host
+      '172.20.10.1', // iPhone Personal Hotspot host
+    };
 
     if (_localIp != null && _localIp!.contains('.')) {
       final parts = _localIp!.split('.');
       if (parts.length == 4) {
         final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+        final subnetGateway = '${parts[0]}.${parts[1]}.${parts[2]}.1';
+        unicastTargets.add(subnetGateway);
         try {
           _udpSocket!.send(bytes, InternetAddress(subnetBroadcast), discoveryUdpPort);
         } catch (_) {}
       }
+    }
+
+    // 2. Unicast pings to Hotspot gateways (bypasses AP broadcast filtering)
+    for (final targetIp in unicastTargets) {
+      if (targetIp == _localIp) continue;
+      try {
+        _udpSocket!.send(bytes, InternetAddress(targetIp), discoveryUdpPort);
+      } catch (_) {}
     }
   }
 
@@ -261,6 +292,17 @@ class DiscoveryManager implements IDiscoveryService {
       );
 
       addOrUpdateDevice(device);
+
+      // Immediately reply unicast to the sender so Hotspot hosts/clients pair in <1s
+      if (data['reply'] != true && _udpSocket != null) {
+        try {
+          _udpSocket!.send(
+            _buildBeaconBytes(isReply: true),
+            datagram.address,
+            datagram.port,
+          );
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 
