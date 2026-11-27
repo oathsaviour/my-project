@@ -22,11 +22,21 @@ void main() {
       expect(states.allEnabled, isFalse);
     });
 
-    test('DiscoveryManager handles P2P, BLE, and NSD peers with transport badges', () async {
+    test('DiscoveryManager handles P2P, BLE, and NSD peers with transport badges and BLE->P2P merge', () async {
       final manager = DiscoveryManager();
       final emitted = <List<DiscoveredDevice>>[];
       final sub = manager.discoveredDevicesStream.listen(emitted.add);
 
+      // BLE arrives first: must NOT place BLE random MAC into p2pAddress
+      manager.handleNativeBlePeer({
+        'name': 'Pixel 8 Pro',
+        'address': '99:88:77:66:55:44',
+        'rssi': -58,
+      });
+      expect(manager.currentDevices.length, 1);
+      expect(manager.currentDevices.first.p2pAddress, isNull);
+
+      // Wi-Fi Direct discovers the same device name: replaces BLE placeholder with real P2P MAC
       manager.handleNativeP2pPeer({
         'name': 'Pixel 8 Pro',
         'address': 'aa:bb:cc:dd:ee:ff',
@@ -44,6 +54,10 @@ void main() {
 
       await Future.delayed(const Duration(milliseconds: 50));
       expect(manager.currentDevices.length, 3);
+      expect(
+        manager.currentDevices.firstWhere((d) => d.name == 'Pixel 8 Pro').p2pAddress,
+        'aa:bb:cc:dd:ee:ff',
+      );
       expect(
         manager.currentDevices.where((d) => d.transport == DiscoveryTransport.nearbyP2p).length,
         2,
@@ -99,9 +113,10 @@ void main() {
       if (await saveDir.exists()) await saveDir.delete(recursive: true);
     });
 
-    test('Mutual session approval skips per-file prompts & supports back-to-back single files', () async {
+    test('Mutual session approval skips per-file prompts & supports back-to-back single files and two-way sends', () async {
       int sessionPromptCount = 0;
       int perFilePromptCount = 0;
+      int trustedManifestCount = 0;
 
       server.onSessionRequested = (sessionId, peerName, peerOs, peerIp, peerPort, pin) async {
         sessionPromptCount++;
@@ -111,6 +126,9 @@ void main() {
         perFilePromptCount++;
         return true;
       };
+      server.onTrustedManifestStarted = (sessionId, senderName, files) {
+        trustedManifestCount++;
+      };
 
       final port = await server.start(
         sessionToken: 'server_tok',
@@ -119,67 +137,112 @@ void main() {
         initialPort: 52910,
       );
 
-      final peer = DiscoveredDevice(
-        id: 'peer_1',
-        name: 'Receiver',
-        os: DeviceOS.android,
-        ipAddress: '127.0.0.1',
-        port: port,
-        sessionToken: 'server_tok',
-        lastSeen: DateTime.now(),
+      final serverA = TransferServer();
+      final clientB = TransferClient();
+      final portA = await serverA.start(
+        sessionToken: 'client_a_tok',
+        verificationPin: '5678',
+        tempStorageDir: tempDir.path,
+        initialPort: 52960,
       );
 
-      const sessionId = 'mutual_sess_001';
-      final token = await client.requestMutualSession(
-        targetDevice: peer,
-        sessionId: sessionId,
-        localName: 'Sender',
-        localOs: DeviceOS.android,
-        localIp: '127.0.0.1',
-        localPort: 52840,
-        authPin: '1234',
-      );
+      try {
+        final peer = DiscoveredDevice(
+          id: 'peer_1',
+          name: 'Receiver',
+          os: DeviceOS.android,
+          ipAddress: '127.0.0.1',
+          port: port,
+          sessionToken: 'server_tok',
+          lastSeen: DateTime.now(),
+        );
 
-      expect(token, 'server_tok');
-      expect(sessionPromptCount, 1);
-      expect(server.isSessionTrusted(sessionId), isTrue);
+        const sessionId = 'mutual_sess_001';
+        final token = await client.requestMutualSession(
+          targetDevice: peer,
+          sessionId: sessionId,
+          localName: 'Sender',
+          localOs: DeviceOS.android,
+          localIp: '127.0.0.1',
+          localPort: portA,
+          authPin: '1234',
+          localToken: 'client_a_tok',
+        );
+        serverA.trustSession(sessionId);
 
-      final file1 = File('${tempDir.path}/single1.bin');
-      await file1.writeAsBytes(List.generate(64 * 1024, (i) => i % 256));
-      final file2 = File('${tempDir.path}/single2.bin');
-      await file2.writeAsBytes(List.generate(96 * 1024, (i) => (i * 3) % 256));
+        expect(token, 'server_tok');
+        expect(sessionPromptCount, 1);
+        expect(server.isSessionTrusted(sessionId), isTrue);
+        expect(server.getSessionPeerToken(sessionId), 'client_a_tok');
 
-      final item1 = FileManifestItem.create(
-        fileId: 'single_1',
-        fileName: 'single1.bin',
-        fileSize: await file1.length(),
-        localFilePath: file1.path,
-      );
-      final item2 = FileManifestItem.create(
-        fileId: 'single_2',
-        fileName: 'single2.bin',
-        fileSize: await file2.length(),
-        localFilePath: file2.path,
-      );
+        final file1 = File('${tempDir.path}/single1.bin');
+        await file1.writeAsBytes(List.generate(64 * 1024, (i) => i % 256));
+        final file2 = File('${tempDir.path}/single2.bin');
+        await file2.writeAsBytes(List.generate(96 * 1024, (i) => (i * 3) % 256));
+        final file3 = File('${tempDir.path}/reply.bin');
+        await file3.writeAsBytes(List.generate(32 * 1024, (i) => (i * 7) % 256));
 
-      final ok1 = await client.sendFiles(
-        targetDevice: peer,
-        senderName: 'Sender',
-        authPin: '1234',
-        filesToSend: [item1],
-        sessionId: sessionId,
-      );
-      final ok2 = await client.sendFiles(
-        targetDevice: peer,
-        senderName: 'Sender',
-        authPin: '1234',
-        filesToSend: [item2],
-        sessionId: sessionId,
-      );
+        final item1 = FileManifestItem.create(
+          fileId: 'single_1',
+          fileName: 'single1.bin',
+          fileSize: await file1.length(),
+          localFilePath: file1.path,
+        );
+        final item2 = FileManifestItem.create(
+          fileId: 'single_2',
+          fileName: 'single2.bin',
+          fileSize: await file2.length(),
+          localFilePath: file2.path,
+        );
+        final item3 = FileManifestItem.create(
+          fileId: 'reply_1',
+          fileName: 'reply.bin',
+          fileSize: await file3.length(),
+          localFilePath: file3.path,
+        );
 
-      expect(ok1, isTrue);
-      expect(ok2, isTrue);
-      expect(perFilePromptCount, 0);
+        final ok1 = await client.sendFiles(
+          targetDevice: peer,
+          senderName: 'Sender',
+          authPin: '1234',
+          filesToSend: [item1],
+          sessionId: sessionId,
+        );
+        final ok2 = await client.sendFiles(
+          targetDevice: peer,
+          senderName: 'Sender',
+          authPin: '1234',
+          filesToSend: [item2],
+          sessionId: sessionId,
+        );
+
+        // Two-way reply from B -> A within the same mutual trusted session (without B knowing A's PIN)
+        final peerA = DiscoveredDevice(
+          id: 'peer_a',
+          name: 'Sender',
+          os: DeviceOS.android,
+          ipAddress: '127.0.0.1',
+          port: portA,
+          sessionToken: server.getSessionPeerToken(sessionId) ?? '',
+          lastSeen: DateTime.now(),
+        );
+        final okReply = await clientB.sendFiles(
+          targetDevice: peerA,
+          senderName: 'Receiver',
+          authPin: '',
+          filesToSend: [item3],
+          sessionId: sessionId,
+        );
+
+        expect(ok1, isTrue);
+        expect(ok2, isTrue);
+        expect(okReply, isTrue);
+        expect(perFilePromptCount, 0);
+        expect(trustedManifestCount, 2);
+      } finally {
+        await serverA.stop();
+        clientB.dispose();
+      }
     });
   });
 }

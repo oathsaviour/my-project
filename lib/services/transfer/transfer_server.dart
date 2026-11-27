@@ -46,9 +46,12 @@ class TransferServer {
   final Map<String, RandomAccessFile> _openFileHandles = {};
   final Map<String, String> _tempFilePaths = {};
   final Set<String> _trustedSessions = {};
+  final Map<String, String> _sessionPeerTokens = {};
+  bool _wakeLockHeld = false;
 
   ProgressCallback? onProgress;
   ManifestReceivedCallback? onManifestReceived;
+  void Function(String sessionId, String senderName, List<FileManifestItem> files)? onTrustedManifestStarted;
   SessionRequestCallback? onSessionRequested;
   void Function(String fileId, String finalPath, String sha256)? onFileCompleted;
 
@@ -58,9 +61,11 @@ class TransferServer {
 
   void revokeSession(String sessionId) {
     _trustedSessions.remove(sessionId);
+    _sessionPeerTokens.remove(sessionId);
   }
 
   bool isSessionTrusted(String sessionId) => _trustedSessions.contains(sessionId);
+  String? getSessionPeerToken(String sessionId) => _sessionPeerTokens[sessionId];
 
   int get port => _port;
   bool get isRunning => _server != null;
@@ -148,11 +153,14 @@ class TransferServer {
     final sessionId = data['sessionId'] as String? ?? '';
     final peerName = data['peerName'] as String? ?? 'Nearby Peer';
     final peerOs = data['peerOs'] as String? ?? 'android';
-    final peerIp = (data['peerIp'] as String?)?.isNotEmpty == true
-        ? data['peerIp'] as String
-        : (request.connectionInfo?.remoteAddress.address ?? '');
+    final declaredIp = data['peerIp'] as String? ?? '';
+    final remoteIp = request.connectionInfo?.remoteAddress.address ?? '';
+    final peerIp = (declaredIp.isNotEmpty && declaredIp != '127.0.0.1')
+        ? declaredIp
+        : (remoteIp.isNotEmpty ? remoteIp : declaredIp);
     final peerPort = (data['peerPort'] as num?)?.toInt() ?? AppConstants.defaultTransferPort;
     final clientToken = data['token'] as String? ?? '';
+    final peerToken = data['localToken'] as String? ?? '';
     final clientPin = data['pin'] as String? ?? '';
 
     bool authOk = _trustedSessions.contains(sessionId);
@@ -174,6 +182,10 @@ class TransferServer {
       return;
     }
 
+    if (sessionId.isNotEmpty && peerToken.isNotEmpty) {
+      _sessionPeerTokens[sessionId] = peerToken;
+    }
+
     if (!_trustedSessions.contains(sessionId) && onSessionRequested != null) {
       final accepted = await onSessionRequested!(
         sessionId,
@@ -184,6 +196,7 @@ class TransferServer {
         clientPin,
       );
       if (!accepted) {
+        _sessionPeerTokens.remove(sessionId);
         request.response.statusCode = HttpStatus.forbidden;
         request.response.write(jsonEncode({'error': 'Connection request declined'}));
         await request.response.close();
@@ -259,7 +272,9 @@ class TransferServer {
     final isTrusted = sessionId.isNotEmpty && _trustedSessions.contains(sessionId);
     final isResume = manifestItems.isNotEmpty &&
         manifestItems.every((m) => _activeFiles.containsKey(m.fileId));
-    if (onManifestReceived != null && !isTrusted && !isResume) {
+    if (isTrusted && !isResume) {
+      onTrustedManifestStarted?.call(sessionId, senderName, manifestItems);
+    } else if (onManifestReceived != null && !isTrusted && !isResume) {
       final accepted = await onManifestReceived!(senderName, manifestItems, pin);
       if (!accepted) {
         request.response.statusCode = HttpStatus.forbidden;
@@ -270,7 +285,10 @@ class TransferServer {
     }
 
     // Keep CPU and screen awake while receiving chunks
-    await WakeLockManager.acquireWakeLock(reason: 'Receiving incoming file batch');
+    if (!_wakeLockHeld) {
+      _wakeLockHeld = true;
+      await WakeLockManager.acquireWakeLock(reason: 'Receiving incoming file batch');
+    }
 
     final responseFiles = <Map<String, dynamic>>[];
 
@@ -289,14 +307,17 @@ class TransferServer {
       int confirmedBytes = 0;
       int confirmedChunks = 0;
 
-      // Check for existing partial download for resume
+      // Check for matching partial download for resume
       final checkpoint = await _resumeManager?.loadCheckpoint(item.fileId);
-      if (checkpoint != null && await file.exists()) {
+      if (checkpoint != null &&
+          checkpoint.fileName == item.fileName &&
+          checkpoint.totalBytes == item.fileSize &&
+          await file.exists()) {
         final actualLength = await file.length();
         confirmedBytes = actualLength;
         confirmedChunks = checkpoint.confirmedChunks;
       } else {
-        // Create or truncate fresh part file
+        await _resumeManager?.deleteCheckpoint(item.fileId);
         await file.create(recursive: true);
       }
 
@@ -449,11 +470,10 @@ class TransferServer {
 
     final item = _activeFiles[fileId]!;
     final tempPath = _tempFilePaths[fileId]!;
-    final raf = _openFileHandles[fileId];
+    final raf = _openFileHandles.remove(fileId);
 
     if (raf != null) {
       await raf.close();
-      _openFileHandles.remove(fileId);
     }
 
     // Step 1: Compute full-file SHA-256 using bounded streaming
@@ -463,6 +483,12 @@ class TransferServer {
     final expectedSha256 = (data['expectedSha256'] as String?) ?? item.expectedSha256;
     if (expectedSha256 != null && expectedSha256.isNotEmpty) {
       if (!ChecksumStream.verifyChecksum(computedSha256, expectedSha256)) {
+        _activeFiles.remove(fileId);
+        _tempFilePaths.remove(fileId);
+        if (_openFileHandles.isEmpty && _wakeLockHeld) {
+          _wakeLockHeld = false;
+          await WakeLockManager.releaseWakeLock();
+        }
         request.response.statusCode = HttpStatus.expectationFailed;
         request.response.write(jsonEncode({
           'error': 'File SHA-256 mismatch',
@@ -484,21 +510,17 @@ class TransferServer {
 
     // Step 4: Clean up checkpoint & per-file active state so back-to-back sends stay clean
     await _resumeManager?.deleteCheckpoint(fileId);
-
-    _activeFiles[fileId] = item.copyWith(
-      status: TransferStatus.completed,
-      actualSha256: computedSha256,
-    );
+    _activeFiles.remove(fileId);
+    _tempFilePaths.remove(fileId);
 
     if (onFileCompleted != null) {
       onFileCompleted!(fileId, finalSavedPath, computedSha256);
     }
 
-    // Release wake lock if all files in the batch are finished
-    if (_activeFiles.values.every((f) => f.status == TransferStatus.completed)) {
+    // Release wake lock once no active incoming files remain open
+    if (_openFileHandles.isEmpty && _wakeLockHeld) {
+      _wakeLockHeld = false;
       await WakeLockManager.releaseWakeLock();
-      _activeFiles.clear();
-      _tempFilePaths.clear();
     }
 
     request.response.statusCode = HttpStatus.ok;
@@ -514,6 +536,7 @@ class TransferServer {
 
   /// Shuts down the server and cleans up active handles.
   Future<void> stop() async {
+    _wakeLockHeld = false;
     await WakeLockManager.forceReleaseAll();
     for (final raf in _openFileHandles.values) {
       try {
@@ -521,6 +544,9 @@ class TransferServer {
       } catch (_) {}
     }
     _openFileHandles.clear();
+    _activeFiles.clear();
+    _tempFilePaths.clear();
+    _sessionPeerTokens.clear();
 
     try {
       await _server?.close(force: true);

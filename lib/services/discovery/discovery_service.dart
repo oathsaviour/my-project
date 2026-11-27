@@ -254,6 +254,9 @@ class DiscoveryManager implements IDiscoveryService {
     final name = data['name'] as String? ?? 'Wi-Fi Direct Peer';
     if (address.isEmpty) return;
 
+    // Remove any placeholder BLE-only entry with the same name so the real Wi-Fi Direct MAC replaces it
+    _devices.removeWhere((id, dev) => id.startsWith('ble_') && dev.name.toLowerCase() == name.toLowerCase());
+
     addOrUpdateDevice(
       DiscoveredDevice(
         id: 'p2p_$address',
@@ -276,7 +279,21 @@ class DiscoveryManager implements IDiscoveryService {
     final rssi = (data['rssi'] as num?)?.toInt();
     if (address.isEmpty) return;
 
-    // Only add BLE badge if no LAN/Wi-Fi Direct peer already represents it
+    // If a Wi-Fi Direct or LAN peer with the same name is already known, enrich its RSSI instead of duplicating
+    final matchingEntry = _devices.entries.where(
+      (e) => !e.key.startsWith('ble_') && e.value.name.toLowerCase() == name.toLowerCase(),
+    );
+    if (matchingEntry.isNotEmpty) {
+      final existing = matchingEntry.first;
+      _devices[existing.key] = existing.value.copyWith(
+        rssi: rssi,
+        lastSeen: DateTime.now(),
+      );
+      _notifyDevices();
+      return;
+    }
+
+    // Do NOT put the BLE random MAC into p2pAddress because WifiP2pManager.connect rejects BLE MACs
     final bleId = 'ble_$address';
     addOrUpdateDevice(
       DiscoveredDevice(
@@ -289,12 +306,38 @@ class DiscoveryManager implements IDiscoveryService {
         lastSeen: DateTime.now(),
         rssi: rssi,
         transport: DiscoveryTransport.nearbyP2p,
-        p2pAddress: address,
+        p2pAddress: null,
       ),
     );
   }
 
-  /// Connects to a Wi-Fi Direct peer and returns the resolved group owner IP.
+  /// Called when native Android Wi-Fi Direct forms a group on either side.
+  Future<void> handleNativeP2pConnected(Map<dynamic, dynamic> data) async {
+    await resolveLocalIp();
+    _sendBeacon();
+
+    final isGroupOwner = data['isGroupOwner'] == true;
+    final groupOwnerIp = data['groupOwnerIp'] as String? ?? '';
+    final peerIp = data['peerIp'] as String? ?? '';
+
+    final resolvedPeerIp = isGroupOwner ? peerIp : groupOwnerIp;
+    if (resolvedPeerIp.isNotEmpty && !_localIps.contains(resolvedPeerIp)) {
+      addOrUpdateDevice(
+        DiscoveredDevice(
+          id: 'p2p_ip_$resolvedPeerIp',
+          name: 'Wi-Fi Direct Peer',
+          os: DeviceOS.android,
+          ipAddress: resolvedPeerIp,
+          port: _transferPort,
+          sessionToken: '',
+          lastSeen: DateTime.now(),
+          transport: DiscoveryTransport.nearbyP2p,
+        ),
+      );
+    }
+  }
+
+  /// Connects to a Wi-Fi Direct peer and returns the resolved peer IP.
   Future<String?> connectP2pPeer(String deviceAddress) async {
     if (!Platform.isAndroid || nativeChannelInvoker == null) return null;
     try {
@@ -302,7 +345,35 @@ class DiscoveryManager implements IDiscoveryService {
         'connectP2pPeer',
         {'deviceAddress': deviceAddress},
       );
-      return res?['groupOwnerIp'] as String?;
+      if (res == null) return null;
+
+      await resolveLocalIp();
+      _sendBeacon();
+
+      final isGroupOwner = res['isGroupOwner'] == true;
+      final groupOwnerIp = res['groupOwnerIp'] as String? ?? '';
+      final peerIp = res['peerIp'] as String? ?? '';
+
+      if (!isGroupOwner && groupOwnerIp.isNotEmpty && !_localIps.contains(groupOwnerIp)) {
+        return groupOwnerIp;
+      }
+
+      if (peerIp.isNotEmpty && !_localIps.contains(peerIp)) {
+        return peerIp;
+      }
+
+      // If this device became the Group Owner, wait briefly for the P2P client's UDP/NSD beacon on 192.168.49.x
+      for (int attempt = 0; attempt < 16; attempt++) {
+        _sendBeacon();
+        await Future.delayed(const Duration(milliseconds: 500));
+        final p2pIpPeer = _devices.values.where(
+          (d) => d.ipAddress.startsWith('192.168.49.') && !_localIps.contains(d.ipAddress),
+        );
+        if (p2pIpPeer.isNotEmpty) {
+          return p2pIpPeer.first.ipAddress;
+        }
+      }
+      return null;
     } catch (_) {
       return null;
     }

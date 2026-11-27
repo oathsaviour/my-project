@@ -28,7 +28,7 @@ class QrPairingModal extends StatefulWidget {
   State<QrPairingModal> createState() => _QrPairingModalState();
 }
 
-class _QrPairingModalState extends State<QrPairingModal> {
+class _QrPairingModalState extends State<QrPairingModal> with WidgetsBindingObserver {
   _PairingTab _activeTab = _PairingTab.myQr;
   late QrPairingPayload _displayPayload;
   final TextEditingController _manualIpController = TextEditingController();
@@ -36,6 +36,7 @@ class _QrPairingModalState extends State<QrPairingModal> {
   final TextEditingController _manualPinController = TextEditingController();
 
   MobileScannerController? _scannerController;
+  Future<void>? _disposeFuture;
   bool _hasHandledScan = false;
   bool _hasCameraPermission = false;
   bool _isCheckingCamera = false;
@@ -45,11 +46,28 @@ class _QrPairingModalState extends State<QrPairingModal> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _displayPayload = widget.localPayload;
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _activeTab == _PairingTab.scanQr &&
+        !_hasCameraPermission &&
+        !_isCheckingCamera &&
+        widget.requestCameraPermission == null) {
+      Permission.camera.isGranted.then((granted) {
+        if (granted && mounted && _activeTab == _PairingTab.scanQr && !_hasCameraPermission) {
+          _ensureCameraAndStartScanner();
+        }
+      });
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _disposeScanner();
     _manualIpController.dispose();
     _manualPortController.dispose();
@@ -57,17 +75,22 @@ class _QrPairingModalState extends State<QrPairingModal> {
     super.dispose();
   }
 
-  Future<void> _disposeScanner() async {
+  Future<void> _disposeScanner() {
+    if (_disposeFuture != null) return _disposeFuture!;
     final controller = _scannerController;
     _scannerController = null;
-    if (controller != null) {
+    if (controller == null) return Future.value();
+
+    final future = () async {
       try {
         await controller.stop();
       } catch (_) {}
       try {
         await controller.dispose();
       } catch (_) {}
-    }
+    }();
+    _disposeFuture = future.whenComplete(() => _disposeFuture = null);
+    return _disposeFuture!;
   }
 
   Future<void> _selectTab(_PairingTab tab) async {
@@ -90,25 +113,40 @@ class _QrPairingModalState extends State<QrPairingModal> {
   }
 
   Future<void> _ensureCameraAndStartScanner() async {
+    if (_isCheckingCamera) return;
     setState(() {
       _isCheckingCamera = true;
       _hasCameraPermission = false;
       _scanError = null;
     });
 
-    final granted = widget.requestCameraPermission != null
-        ? await widget.requestCameraPermission!()
-        : (await Permission.camera.request()).isGranted;
+    bool granted;
+    bool prompted = false;
+    if (widget.requestCameraPermission != null) {
+      granted = await widget.requestCameraPermission!();
+    } else {
+      final current = await Permission.camera.status;
+      if (current.isGranted) {
+        granted = true;
+      } else {
+        prompted = true;
+        granted = (await Permission.camera.request()).isGranted;
+      }
+    }
 
     if (!mounted) return;
 
     if (granted) {
-      // Wait briefly for the Android runtime permission dialog to finish detaching
-      // from the Activity lifecycle before initializing CameraX / MobileScanner.
-      await Future.delayed(const Duration(milliseconds: 300));
+      // Wait briefly if the runtime permission dialog was shown so the Activity
+      // finishes resuming before CameraX / MobileScanner mounts.
+      if (prompted) {
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
       if (!mounted || _activeTab != _PairingTab.scanQr) return;
 
       await _disposeScanner();
+      if (!mounted || _activeTab != _PairingTab.scanQr) return;
+
       final controller = MobileScannerController(
         autoStart: false,
         detectionSpeed: DetectionSpeed.normal,
@@ -153,7 +191,7 @@ class _QrPairingModalState extends State<QrPairingModal> {
     }
   }
 
-  void _onBarcodeDetected(BarcodeCapture capture) {
+  Future<void> _onBarcodeDetected(BarcodeCapture capture) async {
     if (_hasHandledScan) return;
     for (final barcode in capture.barcodes) {
       final raw = barcode.rawValue;
@@ -161,7 +199,8 @@ class _QrPairingModalState extends State<QrPairingModal> {
       final parsed = QrPairingPayload.parse(raw);
       if (parsed != null) {
         _hasHandledScan = true;
-        _disposeScanner();
+        await _disposeScanner();
+        if (!mounted) return;
         Navigator.of(context).pop();
         widget.onPeerScanned(parsed);
         return;

@@ -28,13 +28,9 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- Location fallback for Wi-Fi SSID / P2P scan on Android 12 and below -->
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="32" />
-    <uses-permission
-        android:name="android.permission.ACCESS_COARSE_LOCATION"
-        android:maxSdkVersion="32" />
+    <!-- Location fallback for Wi-Fi SSID / P2P / LocalOnlyHotspot compatibility -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <!-- Granular Media Permissions (Android 13+ / API 33+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />

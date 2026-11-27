@@ -65,12 +65,16 @@ class MainActivity: FlutterActivity() {
     private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
     private var nsdDiscoveryListener: NsdManager.DiscoveryListener? = null
     private var registeredServiceName: String? = null
+    private val pendingNsdResolveQueue = ArrayDeque<NsdServiceInfo>()
+    private var isResolvingNsd = false
 
     // Wi-Fi Direct (P2P)
     private var wifiP2pManager: WifiP2pManager? = null
     private var wifiP2pChannel: WifiP2pManager.Channel? = null
     private var p2pReceiver: BroadcastReceiver? = null
     private var pendingP2pConnectResult: MethodChannel.Result? = null
+    private val p2pTimeoutHandler = Handler(Looper.getMainLooper())
+    private var p2pTimeoutRunnable: Runnable? = null
 
     // BLE Proximity Discovery
     private val bleServiceUuid = ParcelUuid(UUID.fromString("00005284-0000-1000-8000-00805f9b34fb"))
@@ -373,19 +377,10 @@ class MainActivity: FlutterActivity() {
                 override fun onDiscoveryStarted(regType: String) {}
                 override fun onServiceFound(service: NsdServiceInfo) {
                     if (service.serviceName == registeredServiceName) return
-                    nsdManager?.resolveService(service, object : NsdManager.ResolveListener {
-                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
-                        override fun onServiceResolved(resolved: NsdServiceInfo) {
-                            val host = resolved.host?.hostAddress ?: return
-                            runOnUiThread {
-                                methodChannel?.invokeMethod("onNsdPeerFound", mapOf(
-                                    "name" to resolved.serviceName,
-                                    "ip" to host,
-                                    "port" to resolved.port
-                                ))
-                            }
-                        }
-                    })
+                    runOnUiThread {
+                        pendingNsdResolveQueue.addLast(service)
+                        resolveNextNsdService()
+                    }
                 }
                 override fun onServiceLost(service: NsdServiceInfo) {}
                 override fun onDiscoveryStopped(serviceType: String) {}
@@ -396,7 +391,42 @@ class MainActivity: FlutterActivity() {
         } catch (_: Exception) {}
     }
 
+    private fun resolveNextNsdService() {
+        if (isResolvingNsd || pendingNsdResolveQueue.isEmpty()) return
+        val next = pendingNsdResolveQueue.removeFirst()
+        isResolvingNsd = true
+        try {
+            @Suppress("DEPRECATION")
+            nsdManager?.resolveService(next, object : NsdManager.ResolveListener {
+                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                    runOnUiThread {
+                        isResolvingNsd = false
+                        resolveNextNsdService()
+                    }
+                }
+                override fun onServiceResolved(resolved: NsdServiceInfo) {
+                    val host = resolved.host?.hostAddress
+                    runOnUiThread {
+                        if (host != null) {
+                            methodChannel?.invokeMethod("onNsdPeerFound", mapOf(
+                                "name" to resolved.serviceName,
+                                "ip" to host,
+                                "port" to resolved.port
+                            ))
+                        }
+                        isResolvingNsd = false
+                        resolveNextNsdService()
+                    }
+                }
+            })
+        } catch (_: Exception) {
+            isResolvingNsd = false
+        }
+    }
+
     private fun stopNsd() {
+        pendingNsdResolveQueue.clear()
+        isResolvingNsd = false
         try {
             nsdDiscoveryListener?.let { nsdManager?.stopServiceDiscovery(it) }
             nsdRegistrationListener?.let { nsdManager?.unregisterService(it) }
@@ -440,17 +470,23 @@ class MainActivity: FlutterActivity() {
                             wifiP2pManager?.requestConnectionInfo(wifiP2pChannel) { info: WifiP2pInfo? ->
                                 val ownerIp = info?.groupOwnerAddress?.hostAddress
                                 if (info?.groupFormed == true && ownerIp != null) {
+                                    val peerIp = if (info.isGroupOwner) (findP2pClientIpFromArp() ?: "") else ownerIp
+                                    p2pTimeoutRunnable?.let { p2pTimeoutHandler.removeCallbacks(it) }
+                                    p2pTimeoutRunnable = null
+
                                     pendingP2pConnectResult?.success(mapOf(
                                         "groupFormed" to true,
                                         "isGroupOwner" to info.isGroupOwner,
-                                        "groupOwnerIp" to ownerIp
+                                        "groupOwnerIp" to ownerIp,
+                                        "peerIp" to peerIp
                                     ))
                                     pendingP2pConnectResult = null
 
                                     runOnUiThread {
                                         methodChannel?.invokeMethod("onP2pConnected", mapOf(
                                             "isGroupOwner" to info.isGroupOwner,
-                                            "groupOwnerIp" to ownerIp
+                                            "groupOwnerIp" to ownerIp,
+                                            "peerIp" to peerIp
                                         ))
                                     }
                                 }
@@ -471,7 +507,7 @@ class MainActivity: FlutterActivity() {
             })
         } catch (_: Exception) {}
 
-        // 2. BLE Proximity Advertising & Scanning
+        // 2. BLE Proximity Advertising & Scanning (split UUID + serviceData across primary/scanResponse to fit 31B limit)
         try {
             val btManager = applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             val adapter = btManager?.adapter
@@ -485,15 +521,27 @@ class MainActivity: FlutterActivity() {
                     .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
                     .build()
 
-                val shortName = deviceName.take(12).toByteArray(Charsets.UTF_8)
-                val data = AdvertiseData.Builder()
+                val shortName = deviceName.take(10).toByteArray(Charsets.UTF_8)
+                val primaryData = AdvertiseData.Builder()
                     .addServiceUuid(bleServiceUuid)
+                    .setIncludeDeviceName(false)
+                    .build()
+                val scanResponseData = AdvertiseData.Builder()
                     .addServiceData(bleServiceUuid, shortName)
                     .setIncludeDeviceName(false)
                     .build()
 
-                bleAdvertiseCallback = object : AdvertiseCallback() {}
-                bleAdvertiser?.startAdvertising(settings, data, bleAdvertiseCallback)
+                bleAdvertiseCallback = object : AdvertiseCallback() {
+                    override fun onStartFailure(errorCode: Int) {
+                        if (errorCode == ADVERTISE_FAILED_DATA_TOO_LARGE) {
+                            try {
+                                val minimalResp = AdvertiseData.Builder().setIncludeDeviceName(true).build()
+                                bleAdvertiser?.startAdvertising(settings, primaryData, minimalResp, this)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                bleAdvertiser?.startAdvertising(settings, primaryData, scanResponseData, bleAdvertiseCallback)
 
                 val scanFilter = ScanFilter.Builder().setServiceUuid(bleServiceUuid).build()
                 val scanSettings = ScanSettings.Builder()
@@ -523,6 +571,8 @@ class MainActivity: FlutterActivity() {
 
     @SuppressLint("MissingPermission")
     private fun stopP2pAndBle() {
+        p2pTimeoutRunnable?.let { p2pTimeoutHandler.removeCallbacks(it) }
+        p2pTimeoutRunnable = null
         try {
             p2pReceiver?.let { unregisterReceiver(it) }
         } catch (_: Exception) {}
@@ -545,19 +595,51 @@ class MainActivity: FlutterActivity() {
             return
         }
 
+        p2pTimeoutRunnable?.let { p2pTimeoutHandler.removeCallbacks(it) }
+        pendingP2pConnectResult?.error("P2P_SUPERSEDED", "Replaced by a newer Wi-Fi Direct request", null)
+        pendingP2pConnectResult = result
+
+        val timeoutRunnable = Runnable {
+            pendingP2pConnectResult?.error("P2P_TIMEOUT", "Wi-Fi Direct connection timed out", null)
+            pendingP2pConnectResult = null
+            p2pTimeoutRunnable = null
+        }
+        p2pTimeoutRunnable = timeoutRunnable
+        p2pTimeoutHandler.postDelayed(timeoutRunnable, 20_000L)
+
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
+            this.groupOwnerIntent = 0
         }
-        pendingP2pConnectResult = result
         manager.connect(channel, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 // Result will be resolved when WIFI_P2P_CONNECTION_CHANGED_ACTION delivers groupOwnerIp
             }
             override fun onFailure(reason: Int) {
+                p2pTimeoutRunnable?.let { p2pTimeoutHandler.removeCallbacks(it) }
+                p2pTimeoutRunnable = null
                 pendingP2pConnectResult?.error("P2P_CONNECT_FAILED", "Wi-Fi Direct connect failed ($reason)", null)
                 pendingP2pConnectResult = null
             }
         })
+    }
+
+    private fun findP2pClientIpFromArp(): String? {
+        try {
+            val arpFile = File("/proc/net/arp")
+            if (!arpFile.exists()) return null
+            arpFile.forEachLine { line ->
+                val parts = line.trim().split(Regex("\\s+"))
+                if (parts.size >= 6) {
+                    val ip = parts[0]
+                    val iface = parts[5].lowercase()
+                    if ((iface.contains("p2p") || ip.startsWith("192.168.49.")) && ip != "192.168.49.1") {
+                        return ip
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return null
     }
 
     // --- Local-Only Hotspot (Offline QR Pairing Without Router) ---

@@ -96,6 +96,9 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
       case 'onBlePeerFound':
         _discoveryManager.handleNativeBlePeer(args);
         break;
+      case 'onP2pConnected':
+        await _discoveryManager.handleNativeP2pConnected(args);
+        break;
     }
   }
 
@@ -116,6 +119,7 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
 
     _transferServer.onSessionRequested = _handleIncomingSessionRequest;
     _transferServer.onManifestReceived = _handleIncomingManifest;
+    _transferServer.onTrustedManifestStarted = _handleTrustedManifestStarted;
     _transferServer.onProgress = _handleIncomingProgress;
     _transferServer.onFileCompleted = _handleIncomingFileCompleted;
 
@@ -171,13 +175,14 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
     );
 
     if (accepted == true && mounted) {
+      final peerToken = _transferServer.getSessionPeerToken(sessionId) ?? '';
       final peer = DiscoveredDevice(
         id: 'trusted_$peerIp',
         name: peerName,
         os: DeviceOS.fromString(peerOs),
         ipAddress: peerIp,
         port: peerPort,
-        sessionToken: '',
+        sessionToken: peerToken,
         lastSeen: DateTime.now(),
       );
       _activeSessionNotifier.value = TransferSession(
@@ -192,6 +197,45 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
     }
 
     return accepted == true;
+  }
+
+  /// Updates the active trusted session UI immediately when an incoming batch begins.
+  void _handleTrustedManifestStarted(
+    String sessionId,
+    String senderName,
+    List<FileManifestItem> files,
+  ) {
+    if (!mounted) return;
+    _incomingSpeedCalculator.reset();
+    final existing = _activeSessionNotifier.value;
+    if (existing != null) {
+      _activeSessionNotifier.value = existing.copyWith(
+        direction: TransferDirection.incoming,
+        files: files,
+        activeFileIndex: 0,
+        currentSpeedBytesPerSec: 0,
+        estimatedTimeRemaining: null,
+        startTime: DateTime.now(),
+      );
+    } else {
+      _activeSessionNotifier.value = TransferSession(
+        sessionId: sessionId,
+        peer: DiscoveredDevice(
+          id: 'trusted_peer_$sessionId',
+          name: senderName,
+          os: DeviceOS.android,
+          ipAddress: '',
+          port: _transferServer.port,
+          sessionToken: _transferServer.getSessionPeerToken(sessionId) ?? '',
+          lastSeen: DateTime.now(),
+        ),
+        direction: TransferDirection.incoming,
+        authPin: '',
+        files: files,
+        startTime: DateTime.now(),
+      );
+    }
+    _openSessionWorkspace();
   }
 
   /// Fallback per-batch prompt only if sender did not establish a trusted session first.
@@ -297,7 +341,7 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
     int totalChunks,
   ) {
     final current = _activeSessionNotifier.value;
-    if (!mounted || current == null || current.direction != TransferDirection.incoming) return;
+    if (!mounted || current == null || !current.files.any((f) => f.fileId == fileId)) return;
 
     int activeIdx = current.activeFileIndex;
     final updatedFiles = <FileManifestItem>[];
@@ -333,7 +377,7 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
 
   void _handleIncomingFileCompleted(String fileId, String finalPath, String sha256) {
     final current = _activeSessionNotifier.value;
-    if (current != null && current.direction == TransferDirection.incoming) {
+    if (current != null && current.files.any((f) => f.fileId == fileId)) {
       final updatedFiles = current.files.map((f) {
         if (f.fileId == fileId) {
           return f.copyWith(
@@ -420,20 +464,28 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
 
     DiscoveredDevice target = device;
 
-    // If discovered via Wi-Fi Direct / BLE without an IP yet, form P2P group first
-    if (target.ipAddress.isEmpty && target.p2pAddress != null) {
+    // If discovered via Wi-Fi Direct without an IP yet, form P2P group first
+    if (target.ipAddress.isEmpty) {
+      if (target.p2pAddress == null || target.p2pAddress!.isEmpty) {
+        await _discoveryManager.refreshDiscovery();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Resolving Wi-Fi Direct address for ${target.name}. Tap again or use QR Code.')),
+        );
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Connecting via Wi-Fi Direct to ${target.name}...')),
       );
-      final groupOwnerIp = await _discoveryManager.connectP2pPeer(target.p2pAddress!);
+      final peerIp = await _discoveryManager.connectP2pPeer(target.p2pAddress!);
       if (!mounted) return;
-      if (groupOwnerIp == null || groupOwnerIp.isEmpty) {
+      if (peerIp == null || peerIp.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Wi-Fi Direct pairing failed. Try QR code or Hotspot.')),
         );
         return;
       }
-      target = target.copyWith(ipAddress: groupOwnerIp);
+      target = target.copyWith(ipAddress: peerIp);
     }
 
     final sessionId = 'sess_${DateTime.now().millisecondsSinceEpoch}';
@@ -445,6 +497,7 @@ class _MainAppShellState extends State<MainAppShell> with WidgetsBindingObserver
       localIp: _discoveryManager.localIp ?? '',
       localPort: _transferServer.port,
       authPin: authPin,
+      localToken: _discoveryManager.sessionToken,
     );
 
     if (!mounted) return;

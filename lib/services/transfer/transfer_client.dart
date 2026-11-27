@@ -60,11 +60,13 @@ class TransferClient {
     required String localIp,
     required int localPort,
     required String authPin,
+    String localToken = '',
   }) async {
     try {
       final baseUrl = 'http://${targetDevice.ipAddress}:${targetDevice.port}';
       final uri = Uri.parse('$baseUrl/api/v1/session/request');
       final request = await _httpClient.postUrl(uri);
+      request.persistentConnection = false;
       request.headers.contentType = ContentType.json;
       request.write(jsonEncode({
         'sessionId': sessionId,
@@ -73,6 +75,7 @@ class TransferClient {
         'peerIp': localIp,
         'peerPort': localPort,
         'token': targetDevice.sessionToken,
+        'localToken': localToken,
         'pin': authPin,
       }));
       final response = await request.close();
@@ -169,6 +172,7 @@ class TransferClient {
     try {
       final uri = Uri.parse('$baseUrl/api/v1/transfer/handshake');
       final request = await _httpClient.postUrl(uri);
+      request.persistentConnection = false;
       request.headers.contentType = ContentType.json;
 
       request.write(jsonEncode({
@@ -194,6 +198,7 @@ class TransferClient {
   }) async {
     final uri = Uri.parse('$baseUrl/api/v1/transfer/manifest');
     final request = await _httpClient.postUrl(uri);
+    request.persistentConnection = false;
     request.headers.contentType = ContentType.json;
 
     request.write(jsonEncode({
@@ -205,6 +210,7 @@ class TransferClient {
 
     final response = await request.close();
     if (response.statusCode != HttpStatus.ok) {
+      await response.drain<void>();
       throw SocketException('Receiver rejected transfer manifest: HTTP ${response.statusCode}');
     }
 
@@ -429,8 +435,11 @@ class TransferClient {
       if (_isCanceled) return null;
 
       try {
-        final statusUri = Uri.parse('$baseUrl/api/v1/transfer/status?fileId=${item.fileId}');
+        final statusUri = Uri.parse('$baseUrl/api/v1/transfer/status').replace(
+          queryParameters: {'fileId': item.fileId},
+        );
         final statusReq = await _httpClient.getUrl(statusUri).timeout(const Duration(seconds: 3));
+        statusReq.persistentConnection = false;
         final statusRes = await statusReq.close().timeout(const Duration(seconds: 3));
         final body = await utf8.decodeStream(statusRes);
 
@@ -461,8 +470,13 @@ class TransferClient {
     required Uint8List chunkBytes,
     required String chunkSha256,
   }) async {
-    final uri = Uri.parse(
-      '$baseUrl/api/v1/transfer/chunk?fileId=$fileId&chunkIndex=$chunkIndex&totalChunks=$totalChunks&sha256=$chunkSha256',
+    final uri = Uri.parse('$baseUrl/api/v1/transfer/chunk').replace(
+      queryParameters: {
+        'fileId': fileId,
+        'chunkIndex': chunkIndex.toString(),
+        'totalChunks': totalChunks.toString(),
+        'sha256': chunkSha256,
+      },
     );
 
     final request = await _httpClient.postUrl(uri);
@@ -479,6 +493,7 @@ class TransferClient {
   Future<bool> _finalizeFile(String baseUrl, String fileId, {String? expectedSha256}) async {
     final uri = Uri.parse('$baseUrl/api/v1/transfer/finalize');
     final request = await _httpClient.postUrl(uri);
+    request.persistentConnection = false;
     request.headers.contentType = ContentType.json;
 
     request.write(jsonEncode({
