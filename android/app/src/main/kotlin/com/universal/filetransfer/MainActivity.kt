@@ -628,7 +628,7 @@ class MainActivity: FlutterActivity() {
         try {
             val arpFile = File("/proc/net/arp")
             if (!arpFile.exists()) return null
-            arpFile.forEachLine { line ->
+            for (line in arpFile.readLines()) {
                 val parts = line.trim().split(Regex("\\s+"))
                 if (parts.size >= 6) {
                     val ip = parts[0]
